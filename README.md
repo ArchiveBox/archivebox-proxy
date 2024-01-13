@@ -1,11 +1,10 @@
-
-ArchiveBox Proxy
+# ArchiveBox Proxy
 
 A proxy for ArchiveBox with two modes: archive-all or archive-the-list.
 
-On archive-the-list, the proxy is configured with a regex list of what to archive.
+On archive-the-list mode, the proxy is configured with a regex list of what to archive.
 
-On archive-all, the proxy is configured with a regex list of what NOT to archive.
+On archive-all mode, the proxy is configured with a regex list of what NOT to archive.
 
 The config list will carry for each regex:
 - tags to be applied
