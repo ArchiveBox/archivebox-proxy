@@ -1,0 +1,12 @@
+
+# record, archive
+mode: 'record'
+archivebox-path: '/opt/archivebox'
+
+# paths:
+recorded: 'recorded.yaml'
+ignored-urls: 'http_records/ignored-urls.yaml'
+tagged-urls: 'http_records/tagged-urls.yaml'
+archivebox-path: '/home/user/archivebox/'
+
+

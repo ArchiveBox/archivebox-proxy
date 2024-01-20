@@ -1,0 +1,22 @@
+# systemctl service config file
+# port 8080
+
+[Unit]
+Description=archivebox-proxy
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=1
+
+User=user
+Group=user
+WorkingDirectory=/home/user/archivebox-proxy/
+ExecStart=pipenv run mitmdump -s archivebox-proxy.py \'!~a\'
+
+[Install]
+WantedBy=multi-user.target
+
+# sudo ln -sv /home/user/archivebox-proxy/archivebox-proxy.service /etc/systemd/system/archivebox-proxy.service
