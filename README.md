@@ -1,6 +1,8 @@
 # ArchiveBox Proxy
 
-A proxy that saves navigated URLs on [ArchiveBox](https://github.com/mitmproxy/mitmproxy) implemented as a script to [mitmproxy](https://github.com/mitmproxy/mitmproxy).
+A proxy that saves navigated URLs to [ArchiveBox](https://github.com/mitmproxy/mitmproxy), implemented with [mitmproxy](https://github.com/mitmproxy/mitmproxy).
+
+*✨ Contributed by [Bruno Schroeder (@brunocek)](https://github.com/brunocek/archivebox-proxy)*
 
 ---
 This project is intended to meet ArchiveBox's ticket 557: [Feature Request: Browser extension to submit either all history or certain URLs to a given ArchiveBox instance](https://github.com/ArchiveBox/ArchiveBox/issues/577).
