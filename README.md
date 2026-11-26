@@ -27,12 +27,10 @@
 <tr>
 <td valign="middle"><a href="docs/images/visitor-likes.png"><img src="docs/images/visitor-likes.png" width="100%" alt="The original authenticated X Likes session after scrolling" /></a></td>
 <td align="center" valign="middle">
-<strong>→ Cache responses</strong><br><br>
-<strong>Navigation hook →</strong><br>
-<code>archivebox add</code><br>
-<code>--depth=0 URL</code><br><br>
+<strong>→ Cache</strong><br><br>
+<strong>Hook →</strong><br><br>
 <strong>← Capture requests</strong><br>
-<sub>Reuse the same cache</sub>
+<sub>Reuse cache</sub>
 </td>
 <td valign="middle"><a href="docs/images/archivebox-likes.png"><img src="docs/images/archivebox-likes.png" width="100%" alt="The resulting ArchiveBox snapshot with preserved X posts and images" /></a></td>
 </tr>
@@ -43,7 +41,7 @@
 </tr>
 </table>
 
-<p align="center"><sub>One real X Likes visit → automatic capture through the same proxy → an ArchiveBox snapshot ready to replay.</sub></p>
+<p align="center"><sub>The navigation hook runs <code>archivebox add --depth=0 URL</code>. ArchiveBox captures through the same cache and saves a snapshot ready to replay.</sub></p>
 
 - 🌐 **Browse normally.** Your visits populate a shared HTTP/HTTPS response cache through [Proxelar](https://github.com/emanuele-em/proxelar).
 - 📸 **Archive automatically.** Top-level navigations trigger normal [ArchiveBox](https://github.com/ArchiveBox/ArchiveBox) captures, with your plugins and authentication persona.
