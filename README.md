@@ -36,7 +36,7 @@
 </tr>
 <tr>
 <td align="center"><sub>Browse and scroll to populate the cache.</sub></td>
-<td align="center"><sub>Cache misses go upstream.</sub></td>
+<td align="center"><sub>Cache → archive → upstream</sub></td>
 <td align="center"><sub>ArchiveBox runs its normal capture and saves the snapshot.</sub></td>
 </tr>
 </table>
