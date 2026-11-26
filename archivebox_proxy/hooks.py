@@ -24,7 +24,7 @@ async def stop_process(process, grace=10):
         return
     try:
         await asyncio.wait_for(process.wait(), grace)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         try:
             if os.name == "posix":
                 os.killpg(process.pid, signal.SIGKILL)

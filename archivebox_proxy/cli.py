@@ -18,6 +18,8 @@ from aiohttp import web
 
 from .server import Controller
 
+LOG = logging.getLogger(__name__)
+
 
 def argv(value):
     command = json.loads(value)
@@ -335,7 +337,7 @@ async def serve(args):
         ]
         tasks += [asyncio.create_task(process.wait()) for process in processes]
         tasks.append(asyncio.create_task(stop.wait()))
-        logging.info(
+        LOG.info(
             "Proxy on %s; worker proxy %s; CA %s",
             address(args.bind, args.port),
             proxy,
@@ -358,7 +360,7 @@ async def serve(args):
         for process in processes:
             try:
                 await asyncio.wait_for(process.wait(), 10)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 process.kill()
                 await process.wait()
         for task in tasks[2:]:

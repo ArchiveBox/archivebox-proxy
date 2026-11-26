@@ -91,7 +91,7 @@ def expiry(fields, now):
         for n in re.findall(
             r'(?:^|[,\s])(?:s-maxage|max-age)\s*=\s*"?(\d+)',
             cache_control,
-            re.I,
+            re.IGNORECASE,
         )
     ]
     age = hs.get("age", "0")

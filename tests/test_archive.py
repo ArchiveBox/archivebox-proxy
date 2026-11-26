@@ -38,7 +38,7 @@ def test_wacz_original_response_is_replayed_without_modifying_archive(tmp_path):
     status, headers, payload = result
     assert status == 200
     assert hashlib.sha256(payload).hexdigest() == DIGEST
-    assert dict((k.lower(), v) for k, v in headers)["content-type"].startswith(
+    assert {k.lower(): v for k, v in headers}["content-type"].startswith(
         "image/svg+xml"
     )
     assert b"<svg" in payload

@@ -21,3 +21,6 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# Anchor Ruff here so parent workspace settings cannot hide standalone CI errors.
+[tool.ruff]

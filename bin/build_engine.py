@@ -4,12 +4,12 @@
 import argparse
 import hashlib
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tarfile
 import tempfile
 import urllib.request
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REVISION = "91bf33d21c6ff6daa984979310e9b54795f70e4c"

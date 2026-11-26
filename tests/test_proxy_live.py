@@ -1,11 +1,11 @@
 """Exercise the shipped CLI, real Proxelar transports and live public origins."""
 
 import json
-from pathlib import Path
 import socket
 import sqlite3
 import subprocess
 import time
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -73,7 +73,7 @@ class Proxy:
             command += ["-H", f"{k}: {v}"]
         if payload is not None:
             command += ["--data-binary", payload]
-        result = subprocess.run(command + [url], capture_output=True)
+        result = subprocess.run(command + [url], capture_output=True, check=False)
         assert result.returncode == 0, result.stderr.decode() + result.stdout.decode(
             errors="replace"
         )

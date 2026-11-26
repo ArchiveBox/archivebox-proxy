@@ -36,7 +36,7 @@ def original_url(entry):
     """ArchiveWeb.page appends method/body metadata to its indexed URL."""
     url = entry["url"]
     if not isinstance(url, str):
-        raise ValueError("invalid CDXJ URL")
+        raise TypeError("invalid CDXJ URL")
     for marker in ("?__wb_method=", "&__wb_method="):
         if marker in url:
             return url.split(marker, 1)[0]
@@ -46,7 +46,7 @@ def original_url(entry):
 def method_for(entry):
     if entry.get("method"):
         if not isinstance(entry["method"], str):
-            raise ValueError("invalid CDXJ method")
+            raise TypeError("invalid CDXJ method")
         return entry["method"].upper()
     if "__wb_method=" in entry["url"]:
         return entry["url"].split("__wb_method=", 1)[1].split("&", 1)[0].upper()
@@ -126,7 +126,7 @@ class Archive:
                             _, when, raw = line.decode().split(" ", 2)
                             entry = json.loads(raw)
                             if not isinstance(entry, dict):
-                                raise ValueError("invalid CDXJ record")
+                                raise TypeError("invalid CDXJ record")
                             if int(entry["offset"]) < 0 or int(entry["length"]) <= 0:
                                 raise ValueError("invalid WARC record range")
                             position = f"{entry['filename']}:{entry['offset']}"
@@ -273,9 +273,9 @@ class Archive:
                             encoding = record.http_headers.get_header(
                                 "Content-Encoding", ""
                             ).lower()
-                            other_encoding = dict(
-                                (k.lower(), v.lower()) for k, v in resolved[1]
-                            ).get("content-encoding", "")
+                            other_encoding = {
+                                k.lower(): v.lower() for k, v in resolved[1]
+                            }.get("content-encoding", "")
                             if encoding != other_encoding:
                                 continue
                             payload = resolved[2]
