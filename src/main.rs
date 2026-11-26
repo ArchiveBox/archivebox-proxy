@@ -13,10 +13,12 @@ use tokio::{sync::mpsc, task::JoinSet};
 
 #[derive(Parser)]
 struct Args {
-    #[arg(long)]
-    backend: String,
+    #[arg(long, required_unless_present = "init_ca")]
+    backend: Option<String>,
     #[arg(long)]
     ca_dir: PathBuf,
+    #[arg(long, conflicts_with_all = ["backend", "bind", "mode", "target", "worker", "wireguard_endpoint", "dns_upstream", "body_limit"])]
+    init_ca: bool,
     #[arg(long, default_value = "127.0.0.1:8080")]
     bind: SocketAddr,
     #[arg(long, default_value = "forward")]
@@ -43,6 +45,13 @@ async fn main() -> Result<()> {
         .install_default()
         .map_err(|_| anyhow::anyhow!("TLS provider already configured"))?;
     proxyapi::ca::Ssl::load_or_generate(&args.ca_dir)?;
+    if args.init_ca {
+        // Trust setup uses Proxelar's existing CA without opening listeners or
+        // contacting the controller. Reusing it preserves already trusted keys.
+        println!("{}", args.ca_dir.join("proxelar-ca.pem").display());
+        return Ok(());
+    }
+    let backend = args.backend.context("--backend required")?;
     let token = std::env::var("ARCHIVEBOX_PROXY_BACKEND_TOKEN")?;
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -100,7 +109,7 @@ async fn main() -> Result<()> {
             event = events_rx.recv() => {
                 let event = event.context("Proxelar event channel closed")?;
                 let client = client.clone();
-                let url = args.backend.clone();
+                let url = backend.clone();
                 let token = token.clone();
                 let intercept = intercept.clone();
                 // Bound outstanding controller work so sustained traffic cannot
@@ -133,7 +142,7 @@ async fn main() -> Result<()> {
         handlers.spawn(dispatch(
             event,
             client.clone(),
-            args.backend.clone(),
+            backend.clone(),
             token.clone(),
             intercept.clone(),
             args.worker,

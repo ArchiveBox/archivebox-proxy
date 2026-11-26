@@ -1,11 +1,13 @@
 """Exercise an installed wheel against live HTTPS without a source engine."""
 
+import argparse
 import http.client
 import os
 import shutil
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -30,6 +32,9 @@ def wait_for(process, condition, description):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--install-ca", action="store_true")
+    options = parser.parse_args()
     package = Path(archivebox_proxy.__file__).resolve().parent
     engine = package / "bin/archivebox-proxy-engine"
     assert engine.is_file() and os.access(engine, os.X_OK), engine
@@ -52,6 +57,25 @@ def main():
         }
         env.pop("ARCHIVEBOX_DATA", None)
         env.pop("WIREGUARD_ENDPOINT", None)
+        env.pop("ARCHIVEBOX_PROXY_BACKEND_TOKEN", None)
+        # The trust installer prepares this same CA before starting the proxy.
+        # Verify an installed native binary can initialize it independently.
+        ca = data / "ca" / "proxelar-ca.pem"
+        subprocess.run(
+            [str(engine), "--init-ca", "--ca-dir", str(ca.parent)],
+            env=env,
+            check=True,
+            capture_output=True,
+        )
+        certificate = ca.read_bytes()
+        if options.install_ca:
+            # Hosted runners are disposable. Exercise the real installer there
+            # without silently changing a developer's local machine trust.
+            subprocess.run(
+                [cli, "--data", str(data), "--install-ca"],
+                env=env,
+                check=True,
+            )
         console = root / "console.log"
         with console.open("w") as output:
             process = subprocess.Popen(
@@ -77,7 +101,23 @@ def main():
                     lambda: "ArchiveBox Proxy is ready" in console.read_text(),
                     "listeners",
                 )
-                context = ssl.create_default_context(cafile=str(data / "trust.pem"))
+                assert ca.read_bytes() == certificate, (
+                    "Starting the proxy changed its CA"
+                )
+                bundle = data / "trust.pem"
+                if options.install_ca and sys.platform.startswith("linux"):
+                    # Linux verifies the actual refreshed system bundle. macOS
+                    # uses Keychain (verified by --install-ca) independently of
+                    # the Python interpreter's OpenSSL certificate collection.
+                    bundle = next(
+                        path
+                        for path in (
+                            Path("/etc/pki/tls/certs/ca-bundle.crt"),
+                            Path("/etc/ssl/certs/ca-certificates.crt"),
+                        )
+                        if path.is_file()
+                    )
+                context = ssl.create_default_context(cafile=str(bundle))
 
                 def fetch(port):
                     # CONNECT exercises TLS trust with the bundled engine. Using

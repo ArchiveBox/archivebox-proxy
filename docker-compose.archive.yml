@@ -1,4 +1,4 @@
-# docker compose -f compose.yaml -f compose.archive.yaml up --build
+# docker compose -f docker-compose.yml -f docker-compose.archive.yml up --build
 # The archive is an optional read-only fallback, independent of proxy-cache.
 services:
   proxy:

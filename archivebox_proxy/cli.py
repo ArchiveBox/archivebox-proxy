@@ -9,9 +9,12 @@ import logging
 import os
 import queue
 import secrets
+import shlex
 import shutil
 import signal
 import ssl
+import subprocess
+import sys
 from importlib.metadata import version
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
@@ -52,7 +55,9 @@ def default_engine():
     development = source / "target/debug/archivebox-proxy-engine"
     if (source / "Cargo.toml").is_file() and development.is_file():
         return str(development)
-    return str(bundled)
+    # Retain existing source installations that placed their compiled executable
+    # on PATH, while preferring the matching executable shipped in each wheel.
+    return shutil.which("archivebox-proxy-engine") or str(bundled)
 
 
 def parser():
@@ -112,6 +117,23 @@ def parser():
         default="1.1.1.1:53",
         metavar="IP:PORT",
         help="DNS resolver (default: 1.1.1.1:53)",
+    )
+    certificates = connection.add_mutually_exclusive_group()
+    certificates.add_argument(
+        "--install-ca",
+        nargs="?",
+        const=True,
+        type=Path,
+        metavar="FILE",
+        help="Trust FILE or initialize and trust this proxy's CA, then exit",
+    )
+    certificates.add_argument(
+        "--export-ca",
+        nargs="?",
+        const=Path("-"),
+        type=Path,
+        metavar="FILE",
+        help="Export the existing CA certificate to FILE or stdout and exit",
     )
 
     archivebox = p.add_argument_group("ArchiveBox")
@@ -222,7 +244,7 @@ def parser():
     # argparse converts string defaults through each option's existing type;
     # explicitly supplied flags take precedence over their environment defaults.
     for action in p._actions:
-        if action.dest in ("help", "version", "hook"):
+        if action.dest in ("help", "version", "hook", "install_ca"):
             continue
         key = "PROXY_" + action.dest.upper()
         value = os.environ.get(key)
@@ -435,9 +457,10 @@ def startup(args, proxy, ca_dir):
     elif args.mode in ("reverse", "udp"):
         lines.append(f"Requests are forwarded to {args.target}.")
     if args.mode not in ("dns", "udp"):
-        lines.append(
-            "Trust the certificate authority on your browser or device to capture HTTPS."
-        )
+        command = ["archivebox-proxy", "--install-ca"]
+        if args.data != user_data_path("archivebox-proxy", appauthor=False).resolve():
+            command += ["--data", str(args.data)]
+        lines.append("Trust HTTPS certificates: " + shlex.join(command))
     print("\n".join(lines) + "\n", flush=True)
 
 
@@ -607,6 +630,64 @@ async def serve(args):
 def main():
     options = parser()
     args = options.parse_args()
+    if args.install_ca is not None:
+        from .trust import install_ca
+
+        try:
+            if args.install_ca is True:
+                executable = shutil.which(args.engine)
+                if not executable:
+                    raise RuntimeError(
+                        "ArchiveBox Proxy is missing its executable. Reinstall archivebox-proxy for this platform."
+                    )
+                directory = args.data.expanduser().resolve()
+                directory.mkdir(parents=True, exist_ok=True)
+                os.chmod(directory, 0o700)
+                result = subprocess.run(
+                    [executable, "--init-ca", "--ca-dir", str(directory / "ca")],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if result.returncode:
+                    raise RuntimeError(
+                        "Could not initialize certificate: "
+                        + (result.stderr or result.stdout).strip()
+                    )
+                certificate = directory / "ca/proxelar-ca.pem"
+            else:
+                # A remote proxy's exported CA must be trusted as-is; generating
+                # a different local CA would not trust that proxy's connections.
+                certificate = args.install_ca.expanduser().resolve()
+            print("Installing the proxy certificate authority...", flush=True)
+            profiles = install_ca(certificate)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise SystemExit(str(exc)) from exc
+        print(f"Certificate installed and trusted.\nCertificate: {certificate}")
+        if profiles:
+            print(f"Browser certificate databases updated: {profiles}")
+        return
+    if args.export_ca is not None:
+        certificate = args.data.expanduser().resolve() / "ca/proxelar-ca.pem"
+        # Export only the existing public certificate, even when the proxy is
+        # stopped or its executable is unavailable. Never create a second CA.
+        try:
+            pem = certificate.read_bytes()
+        except FileNotFoundError:
+            raise SystemExit(
+                f"Certificate not found: {certificate}\n"
+                "Start ArchiveBox Proxy and wait for 'ArchiveBox Proxy is ready'."
+            ) from None
+        except OSError as exc:
+            raise SystemExit(f"Could not read certificate: {exc}") from exc
+        try:
+            if args.export_ca == Path("-"):
+                sys.stdout.buffer.write(pem)
+            else:
+                args.export_ca.expanduser().write_bytes(pem)
+        except OSError as exc:
+            raise SystemExit(f"Could not export certificate: {exc}") from exc
+        return
     for action in options._actions:
         if action.choices and getattr(args, action.dest) not in action.choices:
             options.error(

@@ -51,8 +51,8 @@ jobs:
           ARCHIVEBOX_DATA: /tmp/archivebox
         run: |
           docker compose config --quiet
-          docker compose -f compose.yaml -f compose.archive.yaml config --quiet
-          docker compose -f compose.yaml -f compose.capture.yaml config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.archive.yml config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.capture.yml config --quiet
       - name: Build proxy image
         run: docker build --target runtime -t archivebox-proxy:ci .
       - name: Exercise HTTPS cache in the container

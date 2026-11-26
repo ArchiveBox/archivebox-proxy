@@ -1,4 +1,4 @@
-# docker compose -f compose.yaml -f compose.capture.yaml up --build
+# docker compose -f docker-compose.yml -f docker-compose.capture.yml up --build
 services:
   proxy:
     build:

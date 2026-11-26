@@ -15,7 +15,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # New pushes replace obsolete builds, while an authorized upload can finish
+  # all four wheels without a newer build cancelling it partway through.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.publish && 'publish' || 'build' }}
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || !inputs.publish }}
 
 jobs:
@@ -56,6 +58,7 @@ jobs:
       - name: Build and exercise installed wheel
         env:
           WHEEL_IDENTIFIER: ${{ matrix.identifier }}
+          CIBW_TEST_COMMAND: uv run --no-project python {project}/bin/test_wheel.py --install-ca
         run: uvx --from cibuildwheel==4.3.5 cibuildwheel --only "$WHEEL_IDENTIFIER" --output-dir dist
       - name: Check package metadata
         run: |
