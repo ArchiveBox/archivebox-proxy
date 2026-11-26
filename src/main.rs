@@ -110,7 +110,35 @@ async fn main() -> Result<()> {
             }
         }
     }
+    // Close admission before cancelling listeners, then persist the events they
+    // already emitted. Otherwise a normal Ctrl-C loses completed captures still
+    // waiting in the bounded channel even though their clients received bytes.
+    events_rx.close();
     jobs.abort_all();
+    while jobs.join_next().await.is_some() {}
+    while let Some(event) = events_rx.recv().await {
+        if let ProxyEvent::RequestIntercepted { id, .. } = event {
+            let _ = intercept.resolve(
+                id,
+                InterceptDecision::Block {
+                    status: 503,
+                    body: bytes::Bytes::from_static(b"Proxy shutting down"),
+                },
+            );
+            continue;
+        }
+        if handlers.len() >= 128 {
+            handlers.join_next().await.unwrap()??;
+        }
+        handlers.spawn(dispatch(
+            event,
+            client.clone(),
+            args.backend.clone(),
+            token.clone(),
+            intercept.clone(),
+            args.worker,
+        ));
+    }
     while let Some(done) = handlers.join_next().await {
         done??;
     }
@@ -140,29 +168,43 @@ async fn dispatch(
                 // Return bytes directly through the intercepted transport. URI
                 // rewrites cannot redirect a reverse HTTP/3 connection away from
                 // its configured origin, and replayed redirects must stay intact.
-                let replay = if request.method() == "HEAD" {
-                    client.head(uri)
-                } else {
-                    client.get(uri)
+                let response = async {
+                    let replay = if request.method() == "HEAD" {
+                        client.head(uri)
+                    } else {
+                        client.get(uri)
+                    }
+                    .send()
+                    .await?;
+                    if replay
+                        .headers()
+                        .get("x-archivebox-proxy-cache")
+                        .and_then(|v| v.to_str().ok())
+                        != Some("HIT")
+                    {
+                        bail!("local replay response expired or failed");
+                    }
+                    // Metadata preserves original header bytes independently
+                    // of the local HTTP server's header serialization.
+                    Ok::<_, anyhow::Error>(InterceptDecision::Respond {
+                        status: serde_json::from_value(answer["status"].clone())?,
+                        headers: serde_json::from_value(answer["headers"].clone())?,
+                        body: replay.bytes().await?,
+                    })
                 }
-                .send()
-                .await?;
-                if replay
-                    .headers()
-                    .get("x-archivebox-proxy-cache")
-                    .and_then(|v| v.to_str().ok())
-                    != Some("HIT")
-                {
-                    bail!("local replay response expired or failed");
-                }
-                // Metadata uses Proxelar's byte-safe header format: the local
-                // HTTP transport may normalize casing or transcode obs-text.
-                let status = serde_json::from_value(answer["status"].clone())?;
-                let headers = serde_json::from_value(answer["headers"].clone())?;
-                InterceptDecision::Respond {
-                    status,
-                    headers,
-                    body: replay.bytes().await?,
+                .await;
+                match response {
+                    Ok(decision) => decision,
+                    Err(error) => {
+                        // An expired ticket or interrupted local body affects
+                        // this request only. Never forward it behind an offline
+                        // policy, and keep unrelated browser traffic running.
+                        eprintln!("Replay failed for request {id}: {error}");
+                        InterceptDecision::Block {
+                            status: 504,
+                            body: bytes::Bytes::from_static(b"Archive replay unavailable"),
+                        }
+                    }
                 }
             } else if answer["block"].as_bool().unwrap_or(false) {
                 InterceptDecision::Block {

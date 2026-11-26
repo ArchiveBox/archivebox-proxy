@@ -41,17 +41,40 @@ def test_navigation_hook_survives_restart_and_reuses_visitor_response(tmp_path):
     finally:
         proxy.close()
 
-    # Restart while the navigation delay is pending. Nothing can rely on an
-    # in-memory task, and the original response must remain usable by the hook.
+    with sqlite3.connect(data / "cache.sqlite3") as db:
+        assert db.execute(
+            "SELECT submitted,error FROM queue WHERE url=?", (url,)
+        ).fetchone() == (None, None)
+
+    # Turning recording off also pauses previously queued work. Leaving the
+    # hook configuration empty must not consume that queue either.
+    for disabled in ((*args, "--no-record"), ()):
+        proxy = Proxy(data, *disabled)
+        try:
+            with sqlite3.connect(data / "cache.sqlite3") as db:
+                due = db.execute(
+                    "SELECT due FROM queue WHERE url=?", (url,)
+                ).fetchone()[0]
+            time.sleep(max(0, due - time.time()) + 0.5)
+            with sqlite3.connect(data / "cache.sqlite3") as db:
+                assert db.execute(
+                    "SELECT submitted,error FROM queue WHERE url=?", (url,)
+                ).fetchone() == (None, None)
+            assert not output.exists()
+        finally:
+            proxy.close()
+
+    # Re-enable hooks against the same durable queue and previously cached body.
     proxy = Proxy(data, *args)
     try:
         events = []
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             if (data / "hooks.jsonl").exists():
+                text = (data / "hooks.jsonl").read_text()
                 events = [
                     json.loads(line)
-                    for line in (data / "hooks.jsonl").read_text().splitlines()
+                    for line in text[: text.rfind("\n") + 1].splitlines()
                 ]
                 if any(event["event"] in ("finish", "error") for event in events):
                     break

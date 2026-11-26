@@ -17,7 +17,7 @@ def port():
 
 
 class Proxy:
-    def __init__(self, data, *extra):
+    def __init__(self, data, *extra, env=None):
         self.data, self.port, self.worker = data, port(), port()
         log_path = data.parent / (data.name + ".log")
         self.log = log_path.open("ab")
@@ -36,11 +36,15 @@ class Proxy:
                 *extra,
             ],
             cwd=ROOT,
+            env=env,
             stdout=self.log,
             stderr=self.log,
         )
-        for _ in range(200):
+        # The CLI gives each of its two listeners ten seconds to start. Let
+        # those bounded readiness checks report failures before this outer guard.
+        for _ in range(500):
             if self.process.poll() is not None:
+                self.log.close()
                 raise AssertionError((data.parent / (data.name + ".log")).read_text())
             # Existing CA files and the first worker listener do not establish
             # visitor readiness. The CLI reports readiness after both bind.
@@ -81,7 +85,15 @@ class Proxy:
         if raw.startswith(b"HTTP/1.1 200 OK\r\n\r\n"):
             raw = raw.split(b"\r\n\r\n", 1)[1]
         fields, content = raw.split(b"\r\n\r\n", 1)
-        return fields.lower(), content
+        # Header names are case-insensitive; values are original response bytes.
+        # Lowercasing values would hide broken cookies, validators, and obs-text.
+        fields = b"\r\n".join(
+            name.lower() + separator + value
+            for name, separator, value in (
+                line.partition(b":") for line in fields.split(b"\r\n")
+            )
+        )
+        return fields, content
 
     def close(self):
         self.process.terminate()
@@ -98,7 +110,7 @@ def test_https_cache_survives_restart_and_worker_does_not_enqueue(tmp_path):
         fields, second = p.fetch(
             "https://news.ycombinator.com/", worker=True, headers=nav
         )
-        assert b"x-archivebox-proxy-cache: hit" in fields
+        assert b"x-archivebox-proxy-cache: HIT" in fields
         assert second == original and b"Hacker News" in second
         assert len((data / "navigations.jsonl").read_text().splitlines()) == 1
         with sqlite3.connect(data / "cache.sqlite3") as db:
@@ -111,7 +123,7 @@ def test_https_cache_survives_restart_and_worker_does_not_enqueue(tmp_path):
     p = Proxy(data, "--policy", "offline")
     try:
         fields, replayed = p.fetch("https://news.ycombinator.com/", worker=True)
-        assert replayed == original and b"x-archivebox-proxy-cache: hit" in fields
+        assert replayed == original and b"x-archivebox-proxy-cache: HIT" in fields
     finally:
         p.close()
 
@@ -128,7 +140,7 @@ def test_post_body_matching_and_cookie_reuse(tmp_path):
             worker=True,
             headers={"Cookie": "different=1"},
         )
-        assert repeated == first and b"x-archivebox-proxy-cache: hit" in fields
+        assert repeated == first and b"x-archivebox-proxy-cache: HIT" in fields
         _, second = p.fetch(url, payload="archivebox-proxy=second")
         assert json.loads(second)["form"]["archivebox-proxy"] == ["second"]
         assert second != first
@@ -140,19 +152,19 @@ def test_replay_preserves_header_bytes_and_duplicates(tmp_path):
     p = Proxy(tmp_path / "cache")
     try:
         url = (
-            "https://httpbingo.org/response-headers?X-Test=caf%C3%A9"
-            "&Set-Cookie=a%3D1&Set-Cookie=b%3D2"
+            "https://httpbingo.org/response-headers?X-Test=Caf%C3%A9"
+            "&Set-Cookie=a%3DOne&Set-Cookie=b%3DTwo"
         )
         first, content = p.fetch(url)
         repeated, replayed = p.fetch(url, worker=True)
         for fields in (first, repeated):
-            assert b"x-test: caf\xc3\xa9" in fields.split(b"\r\n")
+            assert b"x-test: Caf\xc3\xa9" in fields.split(b"\r\n")
             assert [
                 line
                 for line in fields.split(b"\r\n")
                 if line.startswith(b"set-cookie:")
-            ] == [b"set-cookie: a=1", b"set-cookie: b=2"]
-        assert b"x-archivebox-proxy-cache: hit" in repeated
+            ] == [b"set-cookie: a=One", b"set-cookie: b=Two"]
+        assert b"x-archivebox-proxy-cache: HIT" in repeated
         assert replayed == content
     finally:
         p.close()
@@ -167,7 +179,7 @@ def test_replay_preserves_gzip_representation(tmp_path):
         repeated, replayed = p.fetch("https://httpbingo.org/gzip", worker=True)
         assert b"content-encoding: gzip" in fields
         assert b"content-encoding: gzip" in repeated
-        assert b"x-archivebox-proxy-cache: hit" in repeated
+        assert b"x-archivebox-proxy-cache: HIT" in repeated
         assert replayed == original
         assert json.loads(gzip.decompress(replayed))["gzipped"] is True
     finally:
@@ -184,7 +196,7 @@ def test_offline_cli_replays_existing_wacz_into_independent_cache(tmp_path):
     p = Proxy(data, "--policy", "offline", "--archive", str(archive))
     try:
         fields, content = p.fetch("https://news.ycombinator.com/y18.svg")
-        assert b"x-archivebox-proxy-cache: hit" in fields
+        assert b"x-archivebox-proxy-cache: HIT" in fields
         assert (
             hashlib.sha256(content).hexdigest()
             == "e1b6622b6ea15f1f48dfda6e720265cd426981d2a7ae1f9d7ddeb8409897c6ff"

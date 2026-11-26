@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import io
 import json
 import logging
 import secrets
@@ -12,7 +13,15 @@ from aiohttp import web
 from multidict import CIMultiDict
 
 from .archive import Archive
-from .cache import Cache, body, fingerprint, headers
+from .cache import (
+    Cache,
+    body,
+    complete_response,
+    fingerprint,
+    headers,
+    response_headers,
+)
+from .hooks import append_log
 
 LOG = logging.getLogger(__name__)
 
@@ -27,6 +36,9 @@ class Controller:
         policy="auto",
         max_bytes=50 * 1024**3,
         body_limit=64 * 1024**2,
+        record=True,
+        caching=True,
+        replay=True,
         hooks=(),
         hook_env=None,
         hook_cwd=None,
@@ -34,39 +46,46 @@ class Controller:
         self.cache = Cache(directory, max_bytes)
         self.archive = Archive(archive, self.cache.root / "archive-index.sqlite3")
         self.token, self.policy = token, policy
+        self.record, self.caching, self.archive_replay = record, caching, replay
         # Complete events carry both request and response as base64. Keep the
         # authenticated local envelope large enough for configured capture limits.
         self.event_limit = max(512 * 1024**2, body_limit * 3 + 1024**2)
         self.hooks, self.hook_env, self.hook_cwd = hooks, hook_env, hook_cwd
-        self.lock = asyncio.Lock()
+        self.log_lock = asyncio.Lock()
         self.replays = {}
         self.stats = Counter()
         self.base = ""
         self.log = self.cache.root / "navigations.jsonl"
 
+    async def log_event(self, path, event):
+        # Serialize rotation without doing filesystem work on the network loop.
+        async with self.log_lock:
+            await asyncio.to_thread(
+                lambda: append_log(path, (json.dumps(event) + "\n").encode())
+            )
+
     async def lookup(self, req):
-        envelope = await req.json()
+        envelope = await asyncio.to_thread(json.loads, await req.read())
         request = envelope["request"]
         source = "worker" if envelope.get("worker") else "visitor"
         request_id = envelope.get("id", "-")
         hs = {k.lower(): v for k, v in headers(request)}
         if (
-            not envelope.get("worker")
+            self.record
+            and not envelope.get("worker")
             and hs.get("sec-fetch-mode") == "navigate"
             and hs.get("sec-fetch-dest") == "document"
         ):
-            await asyncio.to_thread(self.cache.enqueue, request["uri"])
-            with self.log.open("a") as f:
-                f.write(
-                    json.dumps(
-                        {
-                            "time": time.time(),
-                            "url": request["uri"],
-                            "method": request["method"],
-                        }
-                    )
-                    + "\n"
-                )
+            if self.hooks:
+                await asyncio.to_thread(self.cache.enqueue, request["uri"])
+            await self.log_event(
+                self.log,
+                {
+                    "time": time.time(),
+                    "url": request["uri"],
+                    "method": request["method"],
+                },
+            )
         # Upgrade streams are handled by Proxelar, never replayed as a cached 101.
         if (
             hs.get("upgrade", "").lower() == "websocket"
@@ -76,50 +95,56 @@ class Controller:
             # A capped request snapshot is only a prefix. It cannot share a
             # cache key with a complete smaller POST containing those bytes.
             return web.json_response({"block": self.policy == "offline"})
-        key = fingerprint(request)
-        async with self.lock:
-            hit = (
-                await asyncio.to_thread(
-                    self.cache.get,
-                    key,
-                    self.policy in ("replay", "offline"),
-                    request["method"],
-                )
-                if self.policy != "record"
-                else None
+        key = await asyncio.to_thread(fingerprint, request)
+        hit = (
+            await asyncio.to_thread(
+                self.cache.get,
+                key,
+                self.policy in ("replay", "offline"),
+                request["method"],
+                open_body=True,
             )
-            if hit:
-                LOG.info(
-                    "HIT %s %s %s %s",
-                    source,
-                    request_id,
-                    request["method"],
-                    request["uri"],
-                )
-                return self.replay_ticket(hit, request["method"])
-        if self.policy != "record":
+            if self.caching and self.policy != "record"
+            else None
+        )
+        if hit:
+            LOG.info(
+                "HIT %s %s %s %s", source, request_id, request["method"], request["uri"]
+            )
+            return self.replay_ticket(hit, request["method"])
+        if self.archive_replay and self.policy != "record":
             # Archive lookup can seek/decompress a WACZ on slow storage. Keep
             # that work outside the cache lock so existing hits remain fast.
             saved = await asyncio.to_thread(self.archive.lookup, request)
             if saved:
                 status, fields, payload = saved
-                async with self.lock:
+                if self.caching:
                     await asyncio.to_thread(
                         self.cache.put, key, status, fields, payload, request["method"]
                     )
                     hit = await asyncio.to_thread(
-                        self.cache.get, key, method=request["method"]
+                        self.cache.get, key, method=request["method"], open_body=True
                     )
+                elif complete_response(status, fields, len(payload), request["method"]):
+                    # Replay remains useful with native caching disabled. This
+                    # one response owns a transient stream; no cache row or blob.
+                    hit = {
+                        "stream": io.BytesIO(payload),
+                        "status": status,
+                        "headers": response_headers(
+                            fields, len(payload), request["method"], status
+                        ),
+                    }
+                if hit:
                     self.stats["archive_hit"] += 1
-                    if hit:
-                        LOG.info(
-                            "ARCHIVE %s %s %s %s",
-                            source,
-                            request_id,
-                            request["method"],
-                            request["uri"],
-                        )
-                        return self.replay_ticket(hit, request["method"])
+                    LOG.info(
+                        "ARCHIVE %s %s %s %s",
+                        source,
+                        request_id,
+                        request["method"],
+                        request["uri"],
+                    )
+                    return self.replay_ticket(hit, request["method"])
         self.stats["miss"] += 1
         LOG.info(
             "%s %s %s %s %s",
@@ -132,9 +157,9 @@ class Controller:
         return web.json_response({"block": self.policy == "offline"})
 
     def replay_ticket(self, hit, method):
-        # Open under the same lock as eviction. An already-open file stays
-        # readable if LRU pruning removes its directory entry before delivery.
-        stream = hit["path"].open("rb")
+        # Cache.get opens under eviction protection; archive-only replay owns
+        # a transient stream. Both remain valid until this response is delivered.
+        stream = hit["stream"]
         ticket = secrets.token_urlsafe(32)
         self.replays[ticket] = (time.monotonic() + 60, hit, method, stream)
         self.stats["hit"] += 1
@@ -162,7 +187,7 @@ class Controller:
         )
 
     async def event(self, req):
-        event = await req.json()
+        event = await asyncio.to_thread(json.loads, await req.read())
         if "RequestComplete" in event:
             flow = event["RequestComplete"]
             source = (
@@ -189,36 +214,32 @@ class Controller:
                     request["method"],
                     request["uri"],
                 )
-            elif self.policy != "offline":
-                async with self.lock:
-                    stored = await asyncio.to_thread(
-                        self.cache.put,
+            elif self.caching and self.policy != "offline":
+                stored = await asyncio.to_thread(
+                    lambda: self.cache.put(
                         fingerprint(request),
                         int(response["status"]),
                         headers(response),
                         body(response),
                         request["method"],
                     )
-                    self.stats["stored" if stored else "uncacheable"] += 1
-                    LOG.info(
-                        "%s %s %s %s %s %s",
-                        "STORED" if stored else "UNCACHED",
-                        source,
-                        flow["id"],
-                        response["status"],
-                        request["method"],
-                        request["uri"],
-                    )
+                )
+                self.stats["stored" if stored else "uncacheable"] += 1
+                LOG.info(
+                    "%s %s %s %s %s %s",
+                    "STORED" if stored else "UNCACHED",
+                    source,
+                    flow["id"],
+                    response["status"],
+                    request["method"],
+                    request["uri"],
+                )
         else:
             kind = next(iter(event))
             self.stats[kind] += 1
             # Keep native protocol events without inventing WARC encodings for
             # DNS, WebSocket messages or raw UDP. Rotation bounds debug storage.
-            path = self.cache.root / "events.jsonl"
-            if path.exists() and path.stat().st_size > 16 * 1024**2:
-                path.replace(path.with_suffix(".previous.jsonl"))
-            with path.open("a") as f:
-                f.write(json.dumps(event) + "\n")
+            await self.log_event(self.cache.root / "events.jsonl", event)
         return web.Response(status=204)
 
     async def replay(self, req):
@@ -241,9 +262,10 @@ class Controller:
 
     async def maintenance(self):
         while True:
-            async with self.lock:
+            if self.caching:
                 await asyncio.to_thread(self.cache.prune)
-            await asyncio.to_thread(self.archive.refresh)
+            if self.archive_replay:
+                await asyncio.to_thread(self.archive.refresh)
             for ticket, item in list(self.replays.items()):
                 if item[0] <= time.monotonic():
                     self.replays.pop(ticket)[3].close()
@@ -252,6 +274,8 @@ class Controller:
     async def run_hooks(self):
         from .hooks import HookRunner
 
+        if not self.record:
+            await asyncio.Event().wait()
         return await HookRunner(
             self.cache, self.hooks, self.hook_env, self.hook_cwd
         ).run()
@@ -259,9 +283,9 @@ class Controller:
     def app(self):
         @web.middleware
         async def auth(request, handler):
-            if (
-                not request.path.startswith("/replay/")
-                and request.headers.get("Authorization") != f"Bearer {self.token}"
+            if not request.path.startswith("/replay/") and not secrets.compare_digest(
+                request.headers.get("Authorization", "").encode(),
+                f"Bearer {self.token}".encode(),
             ):
                 raise web.HTTPUnauthorized()
             return await handler(request)

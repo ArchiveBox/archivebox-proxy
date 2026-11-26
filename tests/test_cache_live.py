@@ -58,7 +58,7 @@ def test_cancelled_response_is_not_cached(tmp_path, url):
         assert b"x-archivebox-proxy-cache:" not in fields
         assert len(complete) > len(result.stdout)
         fields, replayed = proxy.fetch(url, worker=True)
-        assert b"x-archivebox-proxy-cache: hit" in fields
+        assert b"x-archivebox-proxy-cache: HIT" in fields
         assert replayed == complete
     finally:
         proxy.close()
@@ -77,7 +77,7 @@ def test_duplicate_cache_control_retains_longer_origin_lifetime(tmp_path):
         assert b"cache-control: max-age=172800" in fields.split(b"\r\n")
         assert b"cache-control: public" in fields.split(b"\r\n")
         repeated, _ = proxy.fetch(url, worker=True)
-        assert b"x-archivebox-proxy-cache: hit" in repeated
+        assert b"x-archivebox-proxy-cache: HIT" in repeated
         with sqlite3.connect(proxy.data / "cache.sqlite3") as db:
             lifetime = db.execute("SELECT expires-used FROM responses").fetchone()[0]
         assert lifetime > 172790
@@ -92,7 +92,7 @@ def test_cached_204_has_no_body_or_content_length(tmp_path):
         fields, replayed = proxy.fetch("https://httpbingo.org/status/204", worker=True)
         assert original == replayed == b""
         assert fields.split(b"\r\n", 1)[0].split()[1] == b"204"
-        assert b"x-archivebox-proxy-cache: hit" in fields
+        assert b"x-archivebox-proxy-cache: HIT" in fields
         assert b"content-length:" not in fields
         assert b"transfer-encoding:" not in fields
         with sqlite3.connect(proxy.data / "cache.sqlite3") as db:

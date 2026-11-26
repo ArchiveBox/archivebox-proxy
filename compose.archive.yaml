@@ -2,27 +2,12 @@
 # The archive is an optional read-only fallback, independent of proxy-cache.
 services:
   proxy:
-    command:
-      - --bind
-      - 0.0.0.0
-      - --port
-      - "8080"
-      - --worker-bind
-      - 0.0.0.0
-      - --worker-port
-      - "8082"
-      - --mode
-      - ${PROXY_MODE:-forward}
-      - --wireguard-endpoint
-      - ${WIREGUARD_ENDPOINT:-127.0.0.1:8080}
-      - --policy
-      - ${PROXY_POLICY:-auto}
-      - --cache-gb
-      - ${PROXY_CACHE_GB:-50}
-      - --archive
-      - /archivebox
+    environment:
+      PROXY_ARCHIVE: /archivebox
     volumes:
       - type: bind
         source: ${ARCHIVEBOX_DATA:?Set ARCHIVEBOX_DATA to the existing ArchiveBox collection}
         target: /archivebox
         read_only: true
+        bind:
+          create_host_path: false

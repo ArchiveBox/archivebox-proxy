@@ -133,6 +133,7 @@ class Cache:
         self.blobs.mkdir(exist_ok=True)
         self.max_bytes = max_bytes
         self.lock = threading.RLock()
+        self.files_lock = threading.RLock()
         self.db = sqlite3.connect(self.root / "cache.sqlite3", check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
@@ -142,38 +143,60 @@ class Cache:
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS queue (url TEXT PRIMARY KEY, due REAL, submitted REAL, error TEXT)"
         )
+        if self.db.execute("PRAGMA user_version").fetchone()[0] < 1:
+            # Old writers replaced the original Content-Length with the captured
+            # prefix length. Those rows cannot prove completion, even for 200s.
+            # Only disposable response metadata is invalidated; queued work and
+            # the independent ArchiveBox collection remain untouched.
+            self.db.execute("DELETE FROM responses")
+            self.db.execute("PRAGMA user_version=1")
         self.db.commit()
 
-    def get(self, key, historical=False, method="GET"):
-        with self.lock:
-            row = self.db.execute(
-                "SELECT filename,status,headers,size,expires FROM responses WHERE key=?",
-                (key,),
-            ).fetchone()
+    def get(self, key, historical=False, method="GET", *, open_body=False):
+        # Publication, opening, and eviction are serialized separately from the
+        # database. Large writes/fsync never take either lock. An opened replay
+        # stays readable if later eviction unlinks its body.
+        with self.files_lock:
+            with self.lock:
+                row = self.db.execute(
+                    "SELECT filename,status,headers,size,expires FROM responses WHERE key=?",
+                    (key,),
+                ).fetchone()
             if not row or (not historical and row[4] <= time.time()):
                 return None
             path = self.blobs / row[0]
             fields = json.loads(row[2])
-            if (
-                not path.is_file()
-                or path.stat().st_size != row[3]
-                or not complete_response(row[1], fields, row[3], method)
-            ):
-                # Older versions could store an interrupted body. Remove its row
-                # before returning a miss; normal pruning collects orphan bytes.
-                self.db.execute("DELETE FROM responses WHERE key=?", (key,))
-                self.db.commit()
+            stream = None
+            try:
+                stream = path.open("rb")
+                valid = os.fstat(stream.fileno()).st_size == row[
+                    3
+                ] and complete_response(row[1], fields, row[3], method)
+            except OSError:
+                valid = False
+            if not valid:
+                if stream is not None:
+                    stream.close()
+                with self.lock:
+                    self.db.execute("DELETE FROM responses WHERE key=?", (key,))
+                    self.db.commit()
                 return None
-            self.db.execute(
-                "UPDATE responses SET used=? WHERE key=?", (time.time(), key)
-            )
-            self.db.commit()
-            return {
+            with self.lock:
+                self.db.execute(
+                    "UPDATE responses SET used=? WHERE key=?", (time.time(), key)
+                )
+                self.db.commit()
+            result = {
                 "path": path,
                 "status": row[1],
                 "headers": fields,
                 "size": row[3],
             }
+            if open_body:
+                result["stream"] = stream
+            else:
+                stream.close()
+            return result
 
     def put(self, key, status, fields, payload, method="GET"):
         if (
@@ -184,25 +207,19 @@ class Cache:
             return False
         name = hashlib.sha256(payload).hexdigest()
         path = self.blobs / name
-        # Publish complete bytes before committing a row. Interrupted writes can
-        # leave an orphan, but can never make a partial response replayable.
-        if not path.exists():
-            import tempfile
+        import tempfile
 
-            with tempfile.NamedTemporaryFile(dir=self.blobs, delete=False) as f:
-                temp = Path(f.name)
-                try:
-                    f.write(payload)
-                    f.flush()
-                    os.fsync(f.fileno())
-                    os.replace(temp, path)
-                finally:
-                    temp.unlink(missing_ok=True)
-        now = time.time()
-        with self.lock:
-            self.db.execute(
-                "INSERT OR REPLACE INTO responses VALUES (?,?,?,?,?,?,?)",
-                (
+        # Staging files live outside bodies/ so pruning cannot remove an active
+        # writer. Publish complete bytes and metadata together under files_lock;
+        # neither disk writes nor fsync hold SQLite's lock or a transaction.
+        with tempfile.NamedTemporaryFile(dir=self.root, delete=False) as f:
+            temp = Path(f.name)
+            try:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+                now = time.time()
+                metadata = (
                     key,
                     name,
                     status,
@@ -210,16 +227,25 @@ class Cache:
                     len(payload),
                     expiry(fields, now),
                     now,
-                ),
-            )
-            self.db.commit()
+                )
+                with self.files_lock:
+                    os.replace(temp, path)
+                    with self.lock:
+                        self.db.execute(
+                            "INSERT OR REPLACE INTO responses VALUES (?,?,?,?,?,?,?)",
+                            metadata,
+                        )
+                        self.db.commit()
+            finally:
+                temp.unlink(missing_ok=True)
         return True
 
     def prune(self):
-        with self.lock:
-            rows = self.db.execute(
-                "SELECT key,filename,size,status,headers FROM responses ORDER BY used DESC"
-            ).fetchall()
+        with self.files_lock:
+            with self.lock:
+                rows = self.db.execute(
+                    "SELECT key,filename,size,status,headers FROM responses ORDER BY used DESC"
+                ).fetchall()
             kept, used, remove = set(), 0, []
             for key, name, size, status, fields in rows:
                 extra = 0 if name in kept else size
@@ -240,10 +266,11 @@ class Cache:
                 else:
                     kept.add(name)
                     used += extra
-            self.db.executemany("DELETE FROM responses WHERE key=?", remove)
-            self.db.commit()
-            # GC runs between writer operations under the same external store
-            # lock; the service serializes put/prune to protect unpublished blobs.
+            with self.lock:
+                self.db.executemany("DELETE FROM responses WHERE key=?", remove)
+                self.db.commit()
+            # Publication cannot race this unlink phase; bulk writes are still
+            # free to continue into their separate staging files.
             for path in self.blobs.iterdir():
                 if path.name not in kept:
                     path.unlink(missing_ok=True)
@@ -251,7 +278,11 @@ class Cache:
     def enqueue(self, url, delay=10):
         with self.lock:
             self.db.execute(
-                "INSERT INTO queue VALUES (?,?,NULL,NULL) ON CONFLICT(url) DO UPDATE SET due=excluded.due, submitted=NULL WHERE queue.submitted < ? OR queue.error IS NOT NULL",
+                "INSERT INTO queue (url,due,submitted,error) VALUES (?,?,NULL,NULL) "
+                "ON CONFLICT(url) DO UPDATE SET due=excluded.due,submitted=NULL,error=NULL "
+                "WHERE (queue.submitted < ? OR queue.error IS NOT NULL) AND "
+                "(queue.error IS NULL OR (queue.error NOT LIKE 'claimed by %' AND "
+                "queue.error != 'started; inspect hooks.jsonl before resubmitting'))",
                 (url, time.time() + delay, time.time() - DAY),
             )
             self.db.commit()

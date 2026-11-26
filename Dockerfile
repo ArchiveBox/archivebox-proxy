@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-ARG ARCHIVEBOX_IMAGE=archivebox/archivebox:0.9.77
+ARG ARCHIVEBOX_IMAGE=archivebox/archivebox:0.9.78rc683
 FROM ghcr.io/astral-sh/uv:0.11.29 AS uv
 FROM rust:1.99.1-bookworm AS engine
 COPY --from=uv /uv /usr/local/bin/uv
@@ -47,7 +47,10 @@ USER root
 WORKDIR /opt/archivebox-proxy
 COPY pyproject.toml uv.lock ./
 COPY archivebox_proxy ./archivebox_proxy
-RUN env -u VIRTUAL_ENV UV_PROJECT_ENVIRONMENT=/opt/archivebox-proxy/venv uv sync --locked --python /venv/bin/python3 --no-dev --no-editable && \
+# Keep root's build cache separate from the upstream image's runtime uv cache,
+# which ArchiveBox needs to write as UID 911 when capture hooks run.
+RUN env -u VIRTUAL_ENV UV_CACHE_DIR=/tmp/proxy-uv-cache UV_PROJECT_ENVIRONMENT=/opt/archivebox-proxy/venv uv sync --locked --python /venv/bin/python3 --no-dev --no-editable && \
+    rm -rf /tmp/proxy-uv-cache && \
     install -d -o 911 -g 911 /cache
 COPY --from=engine /build/target/release/archivebox-proxy-engine /usr/local/bin/
 COPY LICENSE patches/Proxelar.LICENSE-MIT /usr/share/licenses/archivebox-proxy/

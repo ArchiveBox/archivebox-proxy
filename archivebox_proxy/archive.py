@@ -8,6 +8,7 @@ import sqlite3
 import threading
 import zipfile
 import zlib
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from urllib.parse import urldefrag
 
@@ -98,6 +99,8 @@ class Archive:
                         # original headers, request body, or redirect destination.
                         if entry.get("method") != "GET" or entry.get("status") != 200:
                             continue
+                        if not isinstance(entry.get("url"), str):
+                            continue
                         self.contained(path.parent / entry["path"])
                         yield (
                             entry["url"],
@@ -146,51 +149,51 @@ class Archive:
             self.root.glob("**/archivewebpage/*.wacz")
         )
         current = set()
-        with self.lock:
-            for candidate in files:
-                try:
-                    path = self.contained(candidate)
-                    current.add(str(path))
-                    stat = path.stat()
-                    stamp = f"{stat.st_size}:{stat.st_mtime_ns}"
-                    if self.db.execute(
+        for candidate in files:
+            try:
+                path = self.contained(candidate)
+                current.add(str(path))
+                stat = path.stat()
+                stamp = f"{stat.st_size}:{stat.st_mtime_ns}"
+                with self.lock:
+                    unchanged = self.db.execute(
                         "SELECT stamp FROM sources WHERE path=?", (str(path),)
-                    ).fetchone() == (stamp,):
-                        continue
-                    # Parse before opening a write transaction: decompression
-                    # and collection I/O must not keep SQLite's writer locked.
-                    entries = list(self._entries(path))
-                    # Replace one source atomically. A partial/corrupt WACZ must
-                    # not erase its last usable index or abort other sources.
-                    with self.db:
-                        self.db.execute(
-                            "DELETE FROM archive WHERE source=?", (str(path),)
-                        )
-                        self.db.executemany(
-                            "INSERT OR REPLACE INTO archive VALUES (?,?,?,?,?,?)",
-                            entries,
-                        )
-                        self.db.execute(
-                            "INSERT OR REPLACE INTO sources VALUES (?,?)",
-                            (str(path), stamp),
-                        )
-                except READ_ERRORS as exc:
-                    LOG.warning("Cannot index archive %s: %s", candidate, exc)
-            with self.db:
-                for (path,) in self.db.execute("SELECT path FROM sources").fetchall():
-                    if path not in current:
-                        self.db.execute("DELETE FROM archive WHERE source=?", (path,))
-                        self.db.execute("DELETE FROM sources WHERE path=?", (path,))
+                    ).fetchone() == (stamp,)
+                if unchanged:
+                    continue
+                # Parse before opening a write transaction: decompression
+                # and collection I/O must not keep SQLite's writer locked.
+                entries = list(self._entries(path))
+                # Replace one source atomically. A partial/corrupt WACZ must
+                # not erase its last usable index or abort other sources.
+                with self.lock, self.db:
+                    self.db.execute("DELETE FROM archive WHERE source=?", (str(path),))
+                    self.db.executemany(
+                        "INSERT OR REPLACE INTO archive VALUES (?,?,?,?,?,?)",
+                        entries,
+                    )
+                    self.db.execute(
+                        "INSERT OR REPLACE INTO sources VALUES (?,?)",
+                        (str(path), stamp),
+                    )
+            except READ_ERRORS as exc:
+                LOG.warning("Cannot index archive %s: %s", candidate, exc)
+        with self.lock, self.db:
+            for (path,) in self.db.execute("SELECT path FROM sources").fetchall():
+                if path not in current:
+                    self.db.execute("DELETE FROM archive WHERE source=?", (path,))
+                    self.db.execute("DELETE FROM sources WHERE path=?", (path,))
 
     def _candidates(self, url, method):
         # Only materialize matching records, never every response in a collection.
-        return self.db.execute(
-            "SELECT source,metadata FROM archive WHERE url=? AND method=? ORDER BY timestamp DESC",
-            (url, method),
-        ).fetchall()
+        with self.lock:
+            return self.db.execute(
+                "SELECT source,metadata FROM archive WHERE url=? AND method=? ORDER BY timestamp DESC",
+                (url, method),
+            ).fetchall()
 
     def _warc(self, path, entry, request, visited):
-        from .cache import body
+        from .cache import body, complete_response
 
         identity = (str(path), entry["filename"], int(entry["offset"]))
         if identity in visited or len(visited) >= 8:
@@ -231,23 +234,24 @@ class Archive:
                     # CDXJ requestBody is often normalized for replay indexing.
                     # Compare the original paired request bytes instead, so JSON,
                     # multipart, and form bodies never collide accidentally.
-                    paired = _http_record(next(records, None))
-                    if (
-                        not paired
-                        or paired.rec_type != "request"
-                        or not paired.http_headers
+                    requested = body(request)
+                    wanted = (
+                        request["uri"],
+                        request["method"],
+                        len(requested),
+                        hashlib.sha256(requested).digest(),
+                    )
+                    associations = _concurrent(record)
+                    stat = path.stat()
+                    # Wget records request first and puts Concurrent-To on the
+                    # response. ArchiveWeb.page reverses both. Locate by record
+                    # identity, never proximity or URL alone, in either layout.
+                    paired = _requests(str(path), stat.st_size, stat.st_mtime_ns)
+                    if not any(
+                        metadata == wanted
+                        and (request_id in associations or record_id in related)
+                        for request_id, related, metadata in paired
                     ):
-                        return None
-                    if paired.rec_headers.get_header("WARC-Concurrent-To") != record_id:
-                        return None
-                    if (
-                        paired.rec_headers.get_header("WARC-Target-URI")
-                        != request["uri"]
-                    ):
-                        return None
-                    if paired.http_headers.protocol.upper() != request[
-                        "method"
-                    ] or _payload(paired) != body(request):
                         return None
                 # 204 has no entity to resolve: recorders may deduplicate its
                 # empty payload without retaining a separate response record.
@@ -282,6 +286,8 @@ class Archive:
                             break
                     else:
                         return None
+                if not complete_response(status, fields, len(payload)):
+                    return None
                 # Preserve encoded entity bytes and Content-Encoding. Only wire
                 # transfer framing was removed; the cache will frame the new response.
                 fields = [
@@ -297,7 +303,13 @@ class Archive:
             return None
         from .cache import body, headers
 
-        hs = {k.lower(): v for k, v in headers(request)}
+        request_headers = headers(request)
+        hs = {k.lower(): v for k, v in request_headers}
+        accept_encoding = (
+            ",".join(v for k, v in request_headers if k.lower() == "accept-encoding")
+            if "accept-encoding" in hs
+            else None
+        )
         if any(
             k in hs
             for k in (
@@ -314,39 +326,36 @@ class Archive:
         # GET-with-body cannot be reconstructed from loose captures or CDX alone.
         if method in ("GET", "HEAD") and body(request):
             return None
-        with self.lock:
-            for source, metadata in self._candidates(
-                request["uri"], "GET" if method == "HEAD" else method
-            ):
-                try:
-                    entry = json.loads(metadata)
-                    path = self.contained(Path(source))
-                    if path.suffix == ".jsonl":
-                        payload = self.contained(
-                            path.parent / entry["path"]
-                        ).read_bytes()
-                        digest = entry.get("responseSha256")
-                        if digest and hashlib.sha256(payload).hexdigest() != digest:
-                            raise ValueError("saved response digest mismatch")
-                        result = (
-                            200,
-                            [
-                                (
-                                    "Content-Type",
-                                    entry.get("mimeType") or "application/octet-stream",
-                                ),
-                                ("Content-Length", str(len(payload))),
-                            ],
-                            payload,
-                        )
-                    else:
-                        result = self._warc(path, entry, request, set())
-                    if result:
-                        if method == "HEAD":
-                            return result[0], result[1], b""
-                        return result
-                except (StopIteration, *READ_ERRORS) as exc:
-                    LOG.warning("Cannot replay archive %s: %s", source, exc)
+        for source, metadata in self._candidates(
+            request["uri"], "GET" if method == "HEAD" else method
+        ):
+            try:
+                entry = json.loads(metadata)
+                path = self.contained(Path(source))
+                if path.suffix == ".jsonl":
+                    payload = self.contained(path.parent / entry["path"]).read_bytes()
+                    digest = entry.get("responseSha256")
+                    if digest and hashlib.sha256(payload).hexdigest() != digest:
+                        raise ValueError("saved response digest mismatch")
+                    result = (
+                        200,
+                        [
+                            (
+                                "Content-Type",
+                                entry.get("mimeType") or "application/octet-stream",
+                            ),
+                            ("Content-Length", str(len(payload))),
+                        ],
+                        payload,
+                    )
+                else:
+                    result = self._warc(path, entry, request, set())
+                if result and _accepts_encoding(accept_encoding, result[1]):
+                    if method == "HEAD":
+                        return result[0], result[1], b""
+                    return result
+            except (StopIteration, *READ_ERRORS) as exc:
+                LOG.warning("Cannot replay archive %s: %s", source, exc)
         return None
 
 
@@ -355,9 +364,50 @@ def _digest(value):
 
 
 def _payload(record):
+    return _payload_stream(record).read()
+
+
+def _payload_stream(record):
     if record.http_headers.get_header("Transfer-Encoding", "").lower() == "chunked":
-        return ChunkedDataReader(record.raw_stream, raise_exceptions=True).read()
-    return record.raw_stream.read()
+        return ChunkedDataReader(record.raw_stream, raise_exceptions=True)
+    return record.raw_stream
+
+
+def _concurrent(record):
+    return tuple(
+        v for k, v in record.rec_headers.headers if k.lower() == "warc-concurrent-to"
+    )
+
+
+def _accepts_encoding(accept, fields):
+    # An absent Accept-Encoding expresses no preference; an explicitly empty
+    # field accepts only identity. Explicit q=0 overrides a wildcard allowance.
+    if accept is None:
+        return True
+    qualities = {}
+    for item in accept.lower().split(","):
+        coding, *parameters = item.strip().split(";")
+        if not coding:
+            continue
+        quality = 1.0
+        for parameter in parameters:
+            name, separator, value = parameter.strip().partition("=")
+            if name == "q" and separator:
+                try:
+                    quality = float(value)
+                except ValueError:
+                    quality = 0
+        qualities[coding.strip()] = quality if 0 <= quality <= 1 else 0
+    codings = [
+        part.strip().lower()
+        for name, value in fields
+        if name.lower() == "content-encoding"
+        for part in value.split(",")
+    ]
+    return all(
+        qualities.get(coding, qualities.get("*", 1 if coding == "identity" else 0)) > 0
+        for coding in codings or ["identity"]
+    )
 
 
 class HTTPHeadersParser(StatusAndHeadersParser):
@@ -383,3 +433,47 @@ def _http_record(record):
             record.raw_stream
         )
     return record
+
+
+@lru_cache(maxsize=8)
+def _requests(source, size, modified):
+    # CDXJ indexes responses, not their paired requests. Build this small
+    # association map lazily only for POST-like replay, bound its memory by
+    # source count, and invalidate it when the source file changes.
+    requests = []
+    with zipfile.ZipFile(source) as archive:
+        for name in archive.namelist():
+            if not name.startswith("archive/") or not name.endswith(
+                (".warc", ".warc.gz")
+            ):
+                continue
+            with archive.open(name) as stream:
+                for record in ArchiveIterator(stream, no_record_parse=True):
+                    if record.rec_type != "request":
+                        continue
+                    record = _http_record(record)
+                    if not record.http_headers or record.rec_headers.get_header(
+                        "WARC-Truncated"
+                    ):
+                        continue
+                    method = record.http_headers.protocol.upper()
+                    if method in ("GET", "HEAD"):
+                        continue
+                    payload = _payload_stream(record)
+                    digest, length = hashlib.sha256(), 0
+                    while chunk := payload.read(64 * 1024):
+                        digest.update(chunk)
+                        length += len(chunk)
+                    requests.append(
+                        (
+                            record.rec_headers.get_header("WARC-Record-ID"),
+                            _concurrent(record),
+                            (
+                                record.rec_headers.get_header("WARC-Target-URI"),
+                                method,
+                                length,
+                                digest.digest(),
+                            ),
+                        )
+                    )
+    return requests

@@ -4,35 +4,22 @@ services:
     build:
       target: with-archivebox
       args:
-        ARCHIVEBOX_IMAGE: ${ARCHIVEBOX_IMAGE:-archivebox/archivebox:0.9.77}
+        ARCHIVEBOX_IMAGE: ${ARCHIVEBOX_IMAGE:-archivebox/archivebox:0.9.78rc683}
     image: archivebox-proxy:with-archivebox
-    command:
-      - --bind
-      - 0.0.0.0
-      - --port
-      - "8080"
-      - --worker-bind
-      - 0.0.0.0
-      - --worker-port
-      - "8082"
-      - --mode
-      - ${PROXY_MODE:-forward}
-      - --wireguard-endpoint
-      - ${WIREGUARD_ENDPOINT:-127.0.0.1:8080}
-      - --policy
-      - ${PROXY_POLICY:-auto}
-      - --cache-gb
-      - ${PROXY_CACHE_GB:-50}
-      - --archivebox-dir
-      - /data
-      - --archive
-      - /archivebox
+    environment:
+      ARCHIVEBOX_DATA: /data
+      PROXY_ARCHIVE: /archivebox
     volumes:
-      # Only the normal ArchiveBox CLI writes this initialized collection.
+      # The normal CLI writes /data and replay reads /archivebox. Both processes
+      # share this container and UID, so these paths are not a security boundary.
       - type: bind
         source: ${ARCHIVEBOX_DATA:?Set ARCHIVEBOX_DATA to the initialized ArchiveBox collection}
         target: /data
+        bind:
+          create_host_path: false
       - type: bind
         source: ${ARCHIVEBOX_DATA:?Set ARCHIVEBOX_DATA to the initialized ArchiveBox collection}
         target: /archivebox
         read_only: true
+        bind:
+          create_host_path: false

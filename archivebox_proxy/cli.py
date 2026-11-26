@@ -87,6 +87,35 @@ def parser():
     p.add_argument(
         "--worker-proxy", help="worker proxy URL reachable by hook processes"
     )
+    for name, help_text in (
+        ("record", "enqueue navigations and execute configured capture hooks"),
+        ("cache", "read and populate the native response cache"),
+        ("replay", "use the ArchiveBox collection as a replay fallback"),
+    ):
+        p.add_argument(
+            f"--{name}",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help=help_text,
+        )
+    # argparse converts string defaults through each option's existing type;
+    # explicitly supplied flags take precedence over their environment defaults.
+    for action in p._actions:
+        if action.dest in ("help", "hook"):
+            continue
+        key = "PROXY_" + action.dest.upper()
+        value = os.environ.get(key)
+        if value is None and action.dest == "archivebox_dir":
+            value = os.environ.get("ARCHIVEBOX_DATA")
+        if value is None and action.dest == "wireguard_endpoint":
+            value = os.environ.get("WIREGUARD_ENDPOINT")
+        if value is not None and (
+            value or action.dest in ("record", "cache", "replay")
+        ):
+            action.default = value
+    # Repeated CLI --hook arguments replace PROXY_HOOK, rather than silently
+    # executing both environment and command-line side effects.
+    p.set_defaults(hook=None)
     return p
 
 
@@ -122,10 +151,24 @@ def hook_environment(directory, ca_dir, proxy):
     # Keep established system roots as well as our CA, including on platforms
     # whose ssl module has no default PEM path (e.g. system certificate stores).
     context = ssl.create_default_context()
+    paths = ssl.get_default_verify_paths()
+    if paths.cafile:
+        context.load_verify_locations(cafile=paths.cafile)
+    if paths.capath:
+        # OpenSSL loads capath roots lazily, so get_ca_certs() alone can export
+        # an empty bundle. Materialize each PEM before adding the proxy's CA.
+        for path in Path(paths.capath).iterdir():
+            if path.is_file():
+                try:
+                    context.load_verify_locations(cafile=str(path))
+                except ssl.SSLError:
+                    pass  # Certificate directories can also contain CRLs.
     certificates = [
         ssl.DER_cert_to_PEM_cert(cert).encode()
         for cert in context.get_ca_certs(binary_form=True)
     ]
+    if not certificates:
+        raise RuntimeError("No system CA roots loaded; configure SSL_CERT_FILE")
     (directory / "trust.pem").write_bytes(
         b"".join(certificates) + (ca_dir / "proxelar-ca.pem").read_bytes()
     )
@@ -231,7 +274,7 @@ async def serve(args):
     ca_dir = args.data / "ca"
     token = secrets.token_urlsafe(32)
     hooks = list(args.hook)
-    if args.archivebox_dir:
+    if args.archivebox_dir and args.record:
         if not (args.archivebox_dir / "index.sqlite3").is_file():
             raise ValueError(
                 "--archivebox-dir must be an initialized ArchiveBox collection"
@@ -262,6 +305,9 @@ async def serve(args):
         policy=args.policy,
         max_bytes=int(args.cache_gb * 1024**3),
         body_limit=args.body_limit,
+        record=args.record,
+        caching=args.cache,
+        replay=args.replay,
         hooks=hooks,
         hook_cwd=args.archivebox_dir.resolve() if args.archivebox_dir else None,
     )
@@ -272,7 +318,8 @@ async def serve(args):
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
     try:
-        await asyncio.to_thread(controller.archive.refresh)
+        if args.replay:
+            await asyncio.to_thread(controller.archive.refresh)
         await runner.setup()
         site = web.TCPSite(runner, "127.0.0.1", 0)
         await site.start()
@@ -328,7 +375,7 @@ async def serve(args):
                 async with asyncio.timeout(10):
                     await engine_logs(process, ready=True)
                 log_tasks.append(asyncio.create_task(engine_logs(process)))
-        env = hook_environment(args.data, ca_dir, proxy)
+        env = await asyncio.to_thread(hook_environment, args.data, ca_dir, proxy)
         await chrome_environment(env, ca_dir, proxy)
         controller.hook_env = env
         tasks = [
@@ -381,7 +428,35 @@ def main():
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
-    args = parser().parse_args()
+    options = parser()
+    args = options.parse_args()
+    for action in options._actions:
+        if action.choices and getattr(args, action.dest) not in action.choices:
+            options.error(
+                f"PROXY_{action.dest.upper()} must be one of: {', '.join(action.choices)}"
+            )
+    for name in ("record", "cache", "replay"):
+        value = getattr(args, name)
+        if isinstance(value, str):
+            if value.lower() not in (
+                "true",
+                "false",
+                "1",
+                "0",
+                "yes",
+                "no",
+                "on",
+                "off",
+            ):
+                options.error(f"PROXY_{name.upper()} must be true or false")
+            setattr(args, name, value.lower() in ("true", "1", "yes", "on"))
+    if args.hook is None:
+        try:
+            args.hook = (
+                [argv(os.environ["PROXY_HOOK"])] if os.environ.get("PROXY_HOOK") else []
+            )
+        except (ValueError, argparse.ArgumentTypeError) as exc:
+            options.error(f"PROXY_HOOK: {exc}")
     if (
         args.body_limit <= 0
         or args.cache_gb <= 0

@@ -5,10 +5,13 @@ folder-export-menu collection. The responses fixture is its independent
 responses-plugin capture of y18.svg. Neither fixture contains login headers.
 """
 
+import gzip
 import hashlib
 import json
 import shutil
 from pathlib import Path
+
+import pytest
 
 from archivebox_proxy.archive import Archive
 
@@ -56,7 +59,10 @@ def test_loose_response_digest_and_head(tmp_path):
     assert hashlib.sha256(payload).hexdigest() == DIGEST
     head = archive.lookup(request(method="HEAD"))
     assert head == (status, fields, b"")
-    index = json.loads((root / "responses/index.jsonl").read_text())
+    index = next(
+        json.loads(line)
+        for line in (root / "responses/index.jsonl").read_text().splitlines()
+    )
     (root / "responses" / index["path"]).write_bytes(b"corrupt")
     assert archive.lookup(request()) is None
 
@@ -85,7 +91,10 @@ def test_wrong_url_method_or_body_cannot_reuse_a_get(tmp_path):
 
 def test_capture_symlink_cannot_escape_collection(tmp_path):
     archive, root = make_archive(tmp_path, "responses")
-    index = json.loads((root / "responses/index.jsonl").read_text())
+    index = next(
+        json.loads(line)
+        for line in (root / "responses/index.jsonl").read_text().splitlines()
+    )
     payload = root / "responses" / index["path"]
     outside = tmp_path / "outside.svg"
     shutil.move(payload, outside)
@@ -97,3 +106,51 @@ def test_disabled_fallback_never_opens_capture(tmp_path):
     archive = Archive(None, tmp_path / "fallback.sqlite3")
     archive.refresh()
     assert archive.lookup(request()) is None
+
+
+def test_malformed_loose_url_does_not_abort_other_records(tmp_path):
+    archive, root = make_archive(tmp_path, "responses")
+    path = root / "responses/index.jsonl"
+    entry = next(json.loads(line) for line in path.read_text().splitlines())
+    with path.open("a") as output:
+        output.write(json.dumps({**entry, "url": {"invalid": URL}}) + "\n")
+        output.write(json.dumps({**entry, "url": [URL]}) + "\n")
+        output.write(json.dumps(entry) + "\n")
+    archive.refresh()
+    assert hashlib.sha256(archive.lookup(request())[2]).hexdigest() == DIGEST
+
+
+@pytest.mark.parametrize("capture", ["wget", "archivewebpage-post"])
+def test_real_post_pair_with_both_record_orders(tmp_path, capture):
+    # Real httpbingo POST captures from 2026-11-26: Wget records the request
+    # before the response; ArchiveWeb.page records it afterward. Each puts
+    # Concurrent-To on the later record, so both association directions matter.
+    archive, _ = make_archive(tmp_path, capture)
+    req = request(
+        url="https://httpbingo.org/status/200",
+        method="POST",
+        body=list(b"archivebox-proxy=recorded-public-post"),
+    )
+    hit = archive.lookup(req)
+    assert hit is not None and hit[0] == 200 and hit[2] == b""
+    assert archive.lookup({**req, "body": req["body"] + [32]}) is None
+
+
+def test_archive_compression_must_be_accepted_by_request(tmp_path):
+    # The same real Wget capture requested gzip from Hacker News; its WARC
+    # retains the original encoded representation rather than decoded HTML.
+    archive, _ = make_archive(tmp_path, "wget")
+    req = request(
+        url="https://news.ycombinator.com/",
+        headers=[{"name": "Accept-Encoding", "value": "gzip"}],
+    )
+    hit = archive.lookup(req)
+    assert hit is not None and hit[0] == 200
+    assert b"Hacker News" in gzip.decompress(hit[2])
+    for value in ("identity", "gzip;q=0", "br", ""):
+        assert (
+            archive.lookup(
+                {**req, "headers": [{"name": "Accept-Encoding", "value": value}]}
+            )
+            is None
+        )

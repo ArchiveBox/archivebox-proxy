@@ -1,6 +1,7 @@
 """Real QUIC client → Proxelar → public origin, then cached worker replay."""
 
 import asyncio
+import time
 
 from aioquic.asyncio import QuicConnectionProtocol, connect
 from aioquic.h3.connection import H3Connection
@@ -65,7 +66,7 @@ def test_http3_capture_and_replay(tmp_path):
         assert content2 == content
         assert (b"x-archivebox-proxy-cache", b"HIT") in headers2
         fields, worker = proxy.fetch("https://cloudflare-quic.com/", worker=True)
-        assert b"x-archivebox-proxy-cache: hit" in fields and worker == content
+        assert b"x-archivebox-proxy-cache: HIT" in fields and worker == content
     finally:
         proxy.close()
 
@@ -84,7 +85,7 @@ def test_cancelled_http3_streams_do_not_stop_proxy(tmp_path):
             is_client=True, alpn_protocols=["h3"], server_name="cloudflare-quic.com"
         )
         config.load_verify_locations(str(proxy.data / "ca/proxelar-ca.pem"))
-        for _ in range(8):
+        for attempt in range(8):
             async with connect(
                 "127.0.0.1", proxy.port, configuration=config, create_protocol=H3Client
             ) as client:
@@ -100,9 +101,16 @@ def test_cancelled_http3_streams_do_not_stop_proxy(tmp_path):
                     end_stream=True,
                 )
                 client.transmit()
-                # Send a real stream cancellation after its request, as Chrome
-                # does when a page navigation no longer needs an in-flight fetch.
-                await asyncio.sleep(0)
+                # Wait for observed interception, not merely a local event-loop
+                # turn: QUIC may otherwise carry RESET before request headers.
+                deadline = time.monotonic() + 5
+                while (tmp_path / "cancel.log").read_text().count(
+                    "INFO HIT visitor "
+                ) < attempt + 1:
+                    assert time.monotonic() < deadline, (
+                        "cancelled request never reached interception"
+                    )
+                    await asyncio.sleep(0.01)
                 client._quic.reset_stream(stream, 0x10C)  # H3_REQUEST_CANCELLED
                 client.transmit()
 
