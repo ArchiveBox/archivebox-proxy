@@ -47,6 +47,8 @@ class Controller:
     async def lookup(self, req):
         envelope = await req.json()
         request = envelope["request"]
+        source = "worker" if envelope.get("worker") else "visitor"
+        request_id = envelope.get("id", "-")
         hs = {k.lower(): v for k, v in headers(request)}
         if (
             not envelope.get("worker")
@@ -84,7 +86,13 @@ class Controller:
                 else None
             )
             if hit:
-                LOG.info("HIT %s %s", request["method"], request["uri"])
+                LOG.info(
+                    "HIT %s %s %s %s",
+                    source,
+                    request_id,
+                    request["method"],
+                    request["uri"],
+                )
                 return self.replay_ticket(hit, request["method"])
         if self.policy != "record":
             # Archive lookup can seek/decompress a WACZ on slow storage. Keep
@@ -99,12 +107,20 @@ class Controller:
                     hit = await asyncio.to_thread(self.cache.get, key)
                     self.stats["archive_hit"] += 1
                     if hit:
-                        LOG.info("ARCHIVE %s %s", request["method"], request["uri"])
+                        LOG.info(
+                            "ARCHIVE %s %s %s %s",
+                            source,
+                            request_id,
+                            request["method"],
+                            request["uri"],
+                        )
                         return self.replay_ticket(hit, request["method"])
         self.stats["miss"] += 1
         LOG.info(
-            "%s %s %s",
+            "%s %s %s %s %s",
             "BLOCK" if self.policy == "offline" else "MISS",
+            source,
+            request_id,
             request["method"],
             request["uri"],
         )
@@ -144,6 +160,11 @@ class Controller:
         event = await req.json()
         if "RequestComplete" in event:
             flow = event["RequestComplete"]
+            source = (
+                "worker"
+                if req.headers.get("X-ArchiveBox-Proxy-Worker") == "true"
+                else "visitor"
+            )
             request, response = flow["request"], flow["response"]
             if any(
                 k.lower() == "x-archivebox-proxy-cache" and v == "HIT"
@@ -169,8 +190,10 @@ class Controller:
                     )
                     self.stats["stored" if stored else "uncacheable"] += 1
                     LOG.info(
-                        "%s %s %s %s",
+                        "%s %s %s %s %s %s",
                         "STORED" if stored else "UNCACHED",
+                        source,
+                        flow["id"],
                         response["status"],
                         request["method"],
                         request["uri"],

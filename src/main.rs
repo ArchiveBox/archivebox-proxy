@@ -130,7 +130,7 @@ async fn dispatch(
             let answer: serde_json::Value = client
                 .post(format!("{backend}/lookup"))
                 .bearer_auth(&token)
-                .json(&serde_json::json!({"request": request_json(&request)?, "worker": worker}))
+                .json(&serde_json::json!({"id": id, "request": request_json(&request)?, "worker": worker}))
                 .send()
                 .await?
                 .error_for_status()?
@@ -172,9 +172,10 @@ async fn dispatch(
             } else {
                 InterceptDecision::Forward
             };
-            if !intercept.resolve(id, decision) {
-                bail!("interception {id} expired before lookup completed");
-            }
+            // Browsers can cancel an HTTP/2 or QUIC stream during lookup. The
+            // oneshot receiver then disappears and resolve returns false: only
+            // this response is discarded. Controller failures above stay fatal.
+            let _ = intercept.resolve(id, decision);
         }
         other => {
             let event = match other {
@@ -194,6 +195,9 @@ async fn dispatch(
             client
                 .post(format!("{backend}/event"))
                 .bearer_auth(token)
+                // This local authenticated header identifies the listener while
+                // preserving Proxelar's native event representation on disk.
+                .header("X-ArchiveBox-Proxy-Worker", worker.to_string())
                 .json(&event)
                 .send()
                 .await?
