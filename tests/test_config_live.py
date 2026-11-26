@@ -48,6 +48,8 @@ def test_independent_environment_controls(tmp_path, record, caching, replay):
         fields, original = proxy.fetch(URL, headers=NAVIGATION)
         assert b"<svg" in original
         assert (b"x-archivebox-proxy-cache: HIT" in fields) == replay
+        if caching and not replay:
+            proxy.wait_stored(URL)
         fields, repeated = proxy.fetch(URL, worker=True)
         assert repeated == original
         assert (b"x-archivebox-proxy-cache: HIT" in fields) == (caching or replay)
@@ -106,6 +108,7 @@ def test_flags_override_environment_and_offline_never_forwards(tmp_path):
     )
     try:
         proxy.fetch(URL)
+        proxy.wait_stored(URL)
         fields, _ = proxy.fetch(URL, worker=True)
         assert b"x-archivebox-proxy-cache: HIT" in fields
         assert not (proxy.data / "hooks.jsonl").exists()

@@ -20,8 +20,10 @@ class Proxy:
     def __init__(self, data, *extra, env=None):
         self.data, self.port, self.worker = data, port(), port()
         log_path = data.parent / (data.name + ".log")
+        self.log_path = log_path
         self.log = log_path.open("ab")
         log_start = self.log.tell()
+        self.fetch_log_start = log_start
         self.process = subprocess.Popen(
             [
                 "uv",
@@ -56,6 +58,7 @@ class Proxy:
             raise AssertionError("proxy did not become ready")
 
     def fetch(self, url, *, payload=None, worker=False, headers=None):
+        self.fetch_log_start = self.log_path.stat().st_size
         # curl honors an explicit proxy even when ambient NO_PROXY is set.
         command = [
             "curl",
@@ -95,6 +98,36 @@ class Proxy:
         )
         return fields, content
 
+    def wait_stored(self, url, *, method="GET", worker=False):
+        # Client EOF precedes asynchronous RequestComplete delivery, fsync, and
+        # the SQLite commit. Warm-cache assertions need that actual commit, not
+        # another HTTP request or an assumption that curl's exit implies it.
+        source = "worker" if worker else "visitor"
+        deadline = time.monotonic() + 10
+        while True:
+            log = self.log_path.read_bytes()[self.fetch_log_start :].decode(
+                errors="replace"
+            )
+            if self.process.poll() is not None:
+                raise AssertionError(
+                    f"Proxy exited before storing {method} {url}\n{log[-16000:]}"
+                )
+            for line in log.splitlines():
+                _, marker, value = line.partition(" INFO STORED ")
+                fields = value.split(" ", 4)
+                if (
+                    marker
+                    and len(fields) == 5
+                    and fields[0] == source
+                    and fields[3:] == [method, url]
+                ):
+                    return
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    f"No completed cache store for {source} {method} {url}\n{log[-16000:]}"
+                )
+            time.sleep(0.01)
+
     def close(self):
         self.process.terminate()
         self.process.wait(timeout=15)
@@ -107,6 +140,7 @@ def test_https_cache_survives_restart_and_worker_does_not_enqueue(tmp_path):
     nav = {"Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}
     try:
         _, original = p.fetch("https://news.ycombinator.com/", headers=nav)
+        p.wait_stored("https://news.ycombinator.com/")
         fields, second = p.fetch(
             "https://news.ycombinator.com/", worker=True, headers=nav
         )
@@ -134,6 +168,7 @@ def test_post_body_matching_and_cookie_reuse(tmp_path):
         url = "https://httpbingo.org/post"
         _, first = p.fetch(url, payload="archivebox-proxy=first")
         assert json.loads(first)["form"]["archivebox-proxy"] == ["first"]
+        p.wait_stored(url, method="POST")
         fields, repeated = p.fetch(
             url,
             payload="archivebox-proxy=first",
@@ -156,6 +191,7 @@ def test_replay_preserves_header_bytes_and_duplicates(tmp_path):
             "&Set-Cookie=a%3DOne&Set-Cookie=b%3DTwo"
         )
         first, content = p.fetch(url)
+        p.wait_stored(url)
         repeated, replayed = p.fetch(url, worker=True)
         for fields in (first, repeated):
             assert b"x-test: Caf\xc3\xa9" in fields.split(b"\r\n")
@@ -176,6 +212,7 @@ def test_replay_preserves_gzip_representation(tmp_path):
     p = Proxy(tmp_path / "cache")
     try:
         fields, original = p.fetch("https://httpbingo.org/gzip")
+        p.wait_stored("https://httpbingo.org/gzip")
         repeated, replayed = p.fetch("https://httpbingo.org/gzip", worker=True)
         assert b"content-encoding: gzip" in fields
         assert b"content-encoding: gzip" in repeated

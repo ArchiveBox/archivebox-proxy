@@ -57,6 +57,7 @@ def test_cancelled_response_is_not_cached(tmp_path, url):
         fields, complete = proxy.fetch(url)
         assert b"x-archivebox-proxy-cache:" not in fields
         assert len(complete) > len(result.stdout)
+        proxy.wait_stored(url)
         fields, replayed = proxy.fetch(url, worker=True)
         assert b"x-archivebox-proxy-cache: HIT" in fields
         assert replayed == complete
@@ -76,6 +77,7 @@ def test_duplicate_cache_control_retains_longer_origin_lifetime(tmp_path):
         fields, _ = proxy.fetch(url)
         assert b"cache-control: max-age=172800" in fields.split(b"\r\n")
         assert b"cache-control: public" in fields.split(b"\r\n")
+        proxy.wait_stored(url)
         repeated, _ = proxy.fetch(url, worker=True)
         assert b"x-archivebox-proxy-cache: HIT" in repeated
         with sqlite3.connect(proxy.data / "cache.sqlite3") as db:
@@ -89,6 +91,7 @@ def test_cached_204_has_no_body_or_content_length(tmp_path):
     proxy = Proxy(tmp_path / "cache")
     try:
         _, original = proxy.fetch("https://httpbingo.org/status/204")
+        proxy.wait_stored("https://httpbingo.org/status/204")
         fields, replayed = proxy.fetch("https://httpbingo.org/status/204", worker=True)
         assert original == replayed == b""
         assert fields.split(b"\r\n", 1)[0].split()[1] == b"204"
@@ -109,6 +112,7 @@ def test_local_replay_failure_does_not_replace_origin_response(tmp_path):
     url = "https://httpbingo.org/status/200"
     try:
         proxy.fetch(url)
+        proxy.wait_stored(url)
         fields, _ = proxy.fetch(url, worker=True)
         assert b"x-archivebox-proxy-cache: HIT" in fields
         with sqlite3.connect(proxy.data / "cache.sqlite3") as db:
@@ -142,6 +146,7 @@ def test_local_replay_failure_does_not_replace_origin_response(tmp_path):
         # policy; only failures generated inside this proxy are excluded.
         error_url = "https://httpbingo.org/status/503"
         first = subprocess.run(command + [error_url], capture_output=True, check=True)
+        proxy.wait_stored(error_url, worker=True)
         repeated = subprocess.run(
             command + [error_url], capture_output=True, check=True
         )

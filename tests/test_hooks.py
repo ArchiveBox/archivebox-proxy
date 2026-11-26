@@ -38,6 +38,7 @@ def test_navigation_hook_survives_restart_and_reuses_visitor_response(tmp_path):
     try:
         _, original = proxy.fetch(url, headers=navigation)
         assert b"Hacker News" in original
+        proxy.wait_stored(url)
     finally:
         proxy.close()
 

@@ -62,6 +62,7 @@ def test_http3_capture_and_replay(tmp_path):
     try:
         headers, content = asyncio.run(fetch(proxy))
         assert (b":status", b"200") in headers and b"<html" in content.lower()
+        proxy.wait_stored("https://cloudflare-quic.com/")
         headers2, content2 = asyncio.run(fetch(proxy))
         assert content2 == content
         assert (b"x-archivebox-proxy-cache", b"HIT") in headers2
@@ -116,6 +117,7 @@ def test_cancelled_http3_streams_do_not_stop_proxy(tmp_path):
 
     try:
         _, original = asyncio.run(fetch(proxy))
+        proxy.wait_stored("https://cloudflare-quic.com/")
         asyncio.run(cancel_requests())
         headers, content = asyncio.run(fetch(proxy))
         assert proxy.process.poll() is None
