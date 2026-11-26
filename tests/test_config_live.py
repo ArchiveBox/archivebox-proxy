@@ -167,3 +167,92 @@ def test_invalid_environment_value_fails_clearly(name, value):
     )
     assert result.returncode == 2
     assert name.encode() + b" must be " in result.stderr
+
+
+def test_socks_flag_overrides_environment_and_reuses_https_capture(tmp_path):
+    proxy = Proxy(
+        tmp_path / "cache", "--socks", env={**os.environ, "PROXY_MODE": "dns"}
+    )
+    try:
+        result = subprocess.run(
+            [
+                "curl",
+                "--fail-with-body",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "30",
+                "--noproxy",
+                "",
+                "--proxy",
+                f"socks5h://127.0.0.1:{proxy.port}",
+                "--cacert",
+                str(proxy.data / "ca/proxelar-ca.pem"),
+                URL,
+            ],
+            capture_output=True,
+            check=True,
+        )
+        assert b"<svg" in result.stdout
+        proxy.wait_stored(URL)
+        fields, body = proxy.fetch(URL, worker=True)
+        assert b"x-archivebox-proxy-cache: HIT" in fields
+        assert body == result.stdout
+        assert (
+            f"SOCKS5 proxy: socks5h://127.0.0.1:{proxy.port}"
+            in (tmp_path / "cache.log").read_text()
+        )
+    finally:
+        proxy.close()
+
+
+def test_wireguard_flag_produces_importable_configuration(tmp_path):
+    proxy = Proxy(tmp_path / "cache", "--wireguard")
+    try:
+        config = (proxy.data / "ca/proxelar-wg.conf").read_text()
+        assert "[Interface]" in config and "[Peer]" in config
+        assert f"Endpoint = 127.0.0.1:{proxy.port}" in config
+        assert "PrivateKey = " in config and "PublicKey = " in config
+        assert "AllowedIPs = 0.0.0.0/0" in config
+        assert (
+            "Import the client configuration in WireGuard"
+            in (tmp_path / "cache.log").read_text()
+        )
+    finally:
+        proxy.close()
+
+
+def test_export_existing_ca_to_stdout_or_file_without_running_proxy(tmp_path):
+    proxy = Proxy(tmp_path / "cache")
+    proxy.close()
+    certificate = (proxy.data / "ca/proxelar-ca.pem").read_bytes()
+    env = {
+        **os.environ,
+        "PROXY_DATA": str(proxy.data),
+        "PROXY_ENGINE": str(tmp_path / "no-installed-executable"),
+    }
+    command = ["uv", "run", "archivebox-proxy", "--export-ca"]
+    result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, check=True)
+    assert result.stdout == certificate
+    assert b"PRIVATE KEY" not in result.stdout
+    output = tmp_path / "exported.pem"
+    result = subprocess.run(
+        [*command, str(output)], cwd=ROOT, env=env, capture_output=True, check=True
+    )
+    assert output.read_bytes() == certificate
+    assert result.stdout == b""
+
+
+def test_export_missing_ca_fails_without_creating_data(tmp_path):
+    data = tmp_path / "not-started"
+    result = subprocess.run(
+        ["uv", "run", "archivebox-proxy", "--data", str(data), "--export-ca"],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert result.stdout == b""
+    assert b"Certificate not found:" in result.stderr
+    assert b"ArchiveBox Proxy is ready" in result.stderr
+    assert not data.exists()

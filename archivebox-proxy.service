@@ -10,7 +10,7 @@ StateDirectory=archivebox-proxy
 StateDirectoryMode=0700
 WorkingDirectory=/var/lib/archivebox-proxy
 # Listener addresses default to loopback; remote access needs an explicit PROXY_BIND.
-ExecStart=/opt/archivebox-proxy/.venv/bin/archivebox-proxy --engine /usr/local/bin/archivebox-proxy-engine --data /var/lib/archivebox-proxy
+ExecStart=/opt/archivebox-proxy/.venv/bin/archivebox-proxy --data /var/lib/archivebox-proxy
 Restart=on-failure
 RestartSec=5s
 KillSignal=SIGTERM

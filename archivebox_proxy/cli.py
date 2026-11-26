@@ -1,4 +1,4 @@
-"""Run independent Proxelar listeners against one cache and optional hooks."""
+"""Browse through a caching proxy and archive your visits with ArchiveBox."""
 
 import argparse
 import asyncio
@@ -7,14 +7,23 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import secrets
+import shlex
 import shutil
 import signal
 import ssl
+import subprocess
+import sys
+from importlib.metadata import version
+from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from aiohttp import web
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+from platformdirs import user_data_path
 
 from .server import Controller
 
@@ -36,72 +45,206 @@ def argv(value):
     return command
 
 
+def default_engine():
+    bundled = Path(__file__).resolve().parent / "bin/archivebox-proxy-engine"
+    if bundled.is_file():
+        return str(bundled)
+    # Editable source checkouts use their local build; installed wheels always
+    # carry the executable and never download or compile anything at startup.
+    source = Path(__file__).resolve().parents[1]
+    development = source / "target/debug/archivebox-proxy-engine"
+    if (source / "Cargo.toml").is_file() and development.is_file():
+        return str(development)
+    # Retain existing source installations that placed their compiled executable
+    # on PATH, while preferring the matching executable shipped in each wheel.
+    return shutil.which("archivebox-proxy-engine") or str(bundled)
+
+
 def parser():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--data", type=Path, default=Path("data"))
-    p.add_argument(
-        "--engine",
-        default=shutil.which("archivebox-proxy-engine")
-        or str(
-            Path(__file__).resolve().parents[1] / "target/debug/archivebox-proxy-engine"
-        ),
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        usage="%(prog)s [--http | --socks | --wireguard | --dns | --reverse | --udp] [options]",
     )
-    p.add_argument("--bind", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8080)
-    p.add_argument("--worker-bind", default="127.0.0.1")
-    p.add_argument("--worker-port", type=int, default=8082)
     p.add_argument(
+        "--version",
+        action="version",
+        version=f"ArchiveBox Proxy {version('archivebox-proxy')}",
+    )
+    connection = p.add_argument_group("Proxy")
+    transports = connection.add_mutually_exclusive_group()
+    for flag, mode, description in (
+        ("http", "forward", "HTTP and HTTPS proxy (default)"),
+        ("socks", "socks5", "SOCKS5 proxy"),
+        (
+            "wireguard",
+            "wireguard",
+            "WireGuard tunnel with an importable client configuration",
+        ),
+        ("dns", "dns", "DNS proxy"),
+        ("reverse", "reverse", "Reverse proxy to --target URL"),
+        ("udp", "udp", "UDP proxy to --target HOST:PORT"),
+    ):
+        transports.add_argument(
+            f"--{flag}", dest="mode", action="store_const", const=mode, help=description
+        )
+    transports.add_argument(
         "--mode",
         choices=["forward", "socks5", "wireguard", "dns", "reverse", "udp"],
-        default="forward",
+        help=argparse.SUPPRESS,
     )
-    p.add_argument("--target")
-    p.add_argument("--wireguard-endpoint")
-    p.add_argument("--dns-upstream", default="1.1.1.1:53")
-    p.add_argument(
-        "--policy", choices=["auto", "record", "replay", "offline"], default="auto"
+    p.set_defaults(mode="forward")
+    connection.add_argument(
+        "--bind",
+        default="127.0.0.1",
+        metavar="ADDRESS",
+        help="Listen on this address (default: 127.0.0.1)",
     )
-    p.add_argument(
-        "--archive", type=Path, help="read-only ArchiveBox collection for fallback"
+    connection.add_argument(
+        "--port", type=int, default=8080, help="Listen on this port (default: 8080)"
     )
-    p.add_argument("--cache-gb", type=float, default=50)
-    p.add_argument("--body-limit", type=int, default=64 * 1024**2)
-    p.add_argument(
+    connection.add_argument(
+        "--target",
+        metavar="ADDRESS",
+        help="Upstream URL for --reverse, or HOST:PORT for --udp",
+    )
+    connection.add_argument(
+        "--wireguard-endpoint",
+        metavar="HOST:PORT",
+        help="Address your WireGuard client connects to",
+    )
+    connection.add_argument(
+        "--dns-upstream",
+        default="1.1.1.1:53",
+        metavar="IP:PORT",
+        help="DNS resolver (default: 1.1.1.1:53)",
+    )
+    certificates = connection.add_mutually_exclusive_group()
+    certificates.add_argument(
+        "--install-ca",
+        nargs="?",
+        const=True,
+        type=Path,
+        metavar="FILE",
+        help="Trust FILE or initialize and trust this proxy's CA, then exit",
+    )
+    certificates.add_argument(
+        "--export-ca",
+        nargs="?",
+        const=Path("-"),
+        type=Path,
+        metavar="FILE",
+        help="Export the existing CA certificate to FILE or stdout and exit",
+    )
+
+    archivebox = p.add_argument_group("ArchiveBox")
+    archivebox.add_argument(
+        "--archivebox",
+        "--archivebox-dir",
+        dest="archivebox_dir",
+        type=Path,
+        metavar="DIRECTORY",
+        help="Capture visits in this initialized ArchiveBox collection",
+    )
+    archivebox.add_argument(
+        "--persona", metavar="NAME", help="Use this ArchiveBox persona for captures"
+    )
+    archivebox.add_argument(
+        "--archive",
+        type=Path,
+        metavar="DIRECTORY",
+        help="Replay from this collection (default: the capture collection)",
+    )
+    archivebox.add_argument(
+        "--record",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Record navigations and run configured capture hooks (default: enabled)",
+    )
+
+    cache = p.add_argument_group("Cache")
+    cache.add_argument(
+        "--data",
+        type=Path,
+        default=user_data_path("archivebox-proxy", appauthor=False),
+        metavar="DIRECTORY",
+        help="Store cache, certificates and logs here (default: your user data directory)",
+    )
+    cache.add_argument(
+        "--cache-gb",
+        type=float,
+        default=50,
+        metavar="GIB",
+        help="Maximum disk cache size (default: 50 GiB)",
+    )
+    cache.add_argument(
+        "--cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Read and populate the response cache (default: enabled)",
+    )
+    cache.add_argument(
+        "--replay",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Replay responses from the ArchiveBox collection (default: enabled)",
+    )
+    cache.add_argument(
+        "--policy",
+        choices=["auto", "record", "replay", "offline"],
+        default="auto",
+        help="Response lookup policy (default: auto)",
+    )
+
+    advanced = p.add_argument_group("Advanced")
+    advanced.add_argument(
         "--hook",
         type=argv,
         action="append",
-        default=[],
-        help="JSON argv array; {url} is substituted literally",
+        metavar="ARGV",
+        help="Run an additional navigation hook (JSON argument array)",
     )
-    p.add_argument(
-        "--archivebox-dir",
-        type=Path,
-        help="enable archivebox add hook in this initialized collection",
-    )
-    p.add_argument(
+    advanced.add_argument(
         "--archivebox-command",
         type=argv,
         default=["archivebox"],
-        help='JSON argv prefix for ArchiveBox, e.g. ["uv","run","--project","/src/archivebox","archivebox"]',
+        help=argparse.SUPPRESS,
     )
-    p.add_argument(
-        "--worker-proxy", help="worker proxy URL reachable by hook processes"
+    advanced.add_argument("--engine", default=default_engine(), help=argparse.SUPPRESS)
+    advanced.add_argument(
+        "--worker-bind",
+        default="127.0.0.1",
+        metavar="ADDRESS",
+        help="Capture listener address (default: 127.0.0.1)",
     )
-    for name, help_text in (
-        ("record", "enqueue navigations and execute configured capture hooks"),
-        ("cache", "read and populate the native response cache"),
-        ("replay", "use the ArchiveBox collection as a replay fallback"),
-    ):
-        p.add_argument(
-            f"--{name}",
-            action=argparse.BooleanOptionalAction,
-            default=True,
-            help=help_text,
-        )
+    advanced.add_argument(
+        "--worker-port",
+        type=int,
+        default=8082,
+        metavar="PORT",
+        help="Capture listener port (default: 8082)",
+    )
+    advanced.add_argument(
+        "--worker-proxy",
+        metavar="URL",
+        help="Capture proxy URL reachable by hook processes",
+    )
+    advanced.add_argument(
+        "--body-limit",
+        type=int,
+        default=64 * 1024**2,
+        metavar="BYTES",
+        help="Maximum captured request/response size (default: 64 MiB)",
+    )
+    advanced.add_argument(
+        "--verbose",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Show request and connection logs",
+    )
     # argparse converts string defaults through each option's existing type;
     # explicitly supplied flags take precedence over their environment defaults.
     for action in p._actions:
-        if action.dest in ("help", "hook"):
+        if action.dest in ("help", "version", "hook", "install_ca"):
             continue
         key = "PROXY_" + action.dest.upper()
         value = os.environ.get(key)
@@ -110,7 +253,7 @@ def parser():
         if value is None and action.dest == "wireguard_endpoint":
             value = os.environ.get("WIREGUARD_ENDPOINT")
         if value is not None and (
-            value or action.dest in ("record", "cache", "replay")
+            value or action.dest in ("record", "cache", "replay", "verbose")
         ):
             action.default = value
     # Repeated CLI --hook arguments replace PROXY_HOOK, rather than silently
@@ -195,31 +338,12 @@ async def chrome_environment(env, ca_dir, proxy):
     chrome.append("--proxy-server=" + proxy)
     # Chrome does not consistently consult SSL_CERT_FILE. Trust precisely this
     # proxy's CA SPKI for the hook browser, preserving normal certificate checks.
-    proc = await asyncio.create_subprocess_exec(
-        "openssl",
-        "x509",
-        "-in",
-        str(ca_dir / "proxelar-ca.pem"),
-        "-pubkey",
-        "-noout",
-        stdout=asyncio.subprocess.PIPE,
+    certificate = x509.load_pem_x509_certificate(
+        (ca_dir / "proxelar-ca.pem").read_bytes()
     )
-    pem, _ = await proc.communicate()
-    if proc.returncode:
-        raise RuntimeError("cannot read Proxelar CA public key")
-    proc = await asyncio.create_subprocess_exec(
-        "openssl",
-        "pkey",
-        "-pubin",
-        "-outform",
-        "DER",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    der = certificate.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
     )
-    der, _ = await proc.communicate(pem)
-    if proc.returncode:
-        raise RuntimeError("cannot encode Proxelar CA public key")
     pin = base64.b64encode(hashlib.sha256(der).digest()).decode()
     pins = [
         arg.split("=", 1)[1]
@@ -241,7 +365,9 @@ async def wait_listener(process, host, port):
     async with asyncio.timeout(10):
         while True:
             if process.returncode is not None:
-                raise RuntimeError(f"proxy engine exited {process.returncode}")
+                raise RuntimeError(
+                    f"Proxy process exited with status {process.returncode}"
+                )
             try:
                 _, writer = await asyncio.open_connection(connect_host, port)
             except OSError:
@@ -253,18 +379,89 @@ async def wait_listener(process, host, port):
                 # process that already owns this port.
                 await asyncio.sleep(0.05)
                 if process.returncode is not None:
-                    raise RuntimeError(f"proxy engine exited {process.returncode}")
+                    raise RuntimeError(
+                        f"Proxy process exited with status {process.returncode}"
+                    )
                 return
 
 
 async def engine_logs(process, ready=False):
     """Use Proxelar's post-bind log for UDP without sending upstream probes."""
     while line := await process.stdout.readline():
-        print(line.decode(errors="replace").rstrip(), flush=True)
+        message = line.decode(errors="replace").rstrip()
+        if message.startswith("Error:"):
+            LOG.error("%s", message.removeprefix("Error:").strip())
+        else:
+            LOG.info("%s", message)
         if ready and b"proxy listening on " in line:
             return
     if ready:
-        raise RuntimeError(f"proxy engine exited {await process.wait()}")
+        raise RuntimeError(f"Proxy process exited with status {await process.wait()}")
+
+
+def startup(args, proxy, ca_dir):
+    endpoint = address(args.bind, args.port)
+    schemes = {
+        "forward": "http",
+        "socks5": "socks5h",
+        "dns": "dns",
+        "wireguard": "wireguard",
+        "udp": "udp",
+    }
+    scheme = (
+        urlsplit(args.target).scheme if args.mode == "reverse" else schemes[args.mode]
+    )
+    labels = {
+        "forward": "HTTP proxy",
+        "socks5": "SOCKS5 proxy",
+        "wireguard": "WireGuard",
+        "dns": "DNS proxy",
+        "reverse": "Reverse proxy",
+        "udp": "UDP proxy",
+    }
+    lines = [
+        "",
+        "ArchiveBox Proxy is ready",
+        "",
+        f"  {labels[args.mode]}: {scheme}://{endpoint}",
+        f"  Data: {args.data}",
+        f"  Logs: {args.data / 'proxy.log'}",
+    ]
+    if args.mode not in ("dns", "udp"):
+        lines.append(f"  Certificate: {ca_dir / 'proxelar-ca.pem'}")
+    if args.mode == "wireguard":
+        lines.extend(
+            [
+                f"  Client configuration: {ca_dir / 'proxelar-wg.conf'}",
+                f"  Endpoint: {args.wireguard_endpoint}",
+            ]
+        )
+    if args.archivebox_dir and args.record:
+        lines.append(f"  ArchiveBox: {args.archivebox_dir}")
+        if args.persona:
+            lines.append(f"  Persona: {args.persona}")
+        lines.append(f"  Capture proxy: {proxy}")
+    if args.archive and args.replay:
+        lines.append(f"  Archive replay: {args.archive}")
+    lines.append("")
+    if args.mode == "forward":
+        lines.append(f"Set your browser's HTTP and HTTPS proxy to {endpoint}.")
+    elif args.mode == "socks5":
+        lines.append(f"Set your browser's SOCKS5 proxy to {endpoint}.")
+    elif args.mode == "wireguard":
+        lines.append(
+            "Import the client configuration in WireGuard and activate the tunnel."
+        )
+    elif args.mode == "dns":
+        lines.append(f"Send DNS queries to {endpoint} (upstream: {args.dns_upstream}).")
+    elif args.mode in ("reverse", "udp"):
+        lines.append(f"Requests are forwarded to {args.target}.")
+    if args.mode not in ("dns", "udp"):
+        command = ["archivebox-proxy", "--install-ca"]
+        if args.data != user_data_path("archivebox-proxy", appauthor=False).resolve():
+            command += ["--data", str(args.data)]
+        lines.append("Trust HTTPS certificates: " + shlex.join(command))
+    print("\n".join(lines) + "\n", flush=True)
 
 
 async def serve(args):
@@ -279,7 +476,10 @@ async def serve(args):
             raise ValueError(
                 "--archivebox-dir must be an initialized ArchiveBox collection"
             )
-        hooks.append([*args.archivebox_command, "add", "--depth=0", "{url}"])
+        command = [*args.archivebox_command, "add", "--depth=0"]
+        if args.persona:
+            command += ["--persona", args.persona]
+        hooks.append([*command, "{url}"])
     proxy_host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(
         args.worker_bind, args.worker_bind
     )
@@ -366,10 +566,12 @@ async def serve(args):
             process = await asyncio.create_subprocess_exec(
                 *command,
                 env=engine_env,
-                stdout=None if tcp else asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
             )
             processes.append(process)
             if tcp:
+                log_tasks.append(asyncio.create_task(engine_logs(process)))
                 await wait_listener(process, bind, port)
             else:
                 async with asyncio.timeout(10):
@@ -390,6 +592,7 @@ async def serve(args):
             proxy,
             ca_dir / "proxelar-ca.pem",
         )
+        startup(args, proxy, ca_dir)
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         if not stop.is_set():
             for task in done:
@@ -425,17 +628,72 @@ async def serve(args):
 
 
 def main():
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
-    )
     options = parser()
     args = options.parse_args()
+    if args.install_ca is not None:
+        from .trust import install_ca
+
+        try:
+            if args.install_ca is True:
+                executable = shutil.which(args.engine)
+                if not executable:
+                    raise RuntimeError(
+                        "ArchiveBox Proxy is missing its executable. Reinstall archivebox-proxy for this platform."
+                    )
+                directory = args.data.expanduser().resolve()
+                directory.mkdir(parents=True, exist_ok=True)
+                os.chmod(directory, 0o700)
+                result = subprocess.run(
+                    [executable, "--init-ca", "--ca-dir", str(directory / "ca")],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if result.returncode:
+                    raise RuntimeError(
+                        "Could not initialize certificate: "
+                        + (result.stderr or result.stdout).strip()
+                    )
+                certificate = directory / "ca/proxelar-ca.pem"
+            else:
+                # A remote proxy's exported CA must be trusted as-is; generating
+                # a different local CA would not trust that proxy's connections.
+                certificate = args.install_ca.expanduser().resolve()
+            print("Installing the proxy certificate authority...", flush=True)
+            profiles = install_ca(certificate)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise SystemExit(str(exc)) from exc
+        print(f"Certificate installed and trusted.\nCertificate: {certificate}")
+        if profiles:
+            print(f"Browser certificate databases updated: {profiles}")
+        return
+    if args.export_ca is not None:
+        certificate = args.data.expanduser().resolve() / "ca/proxelar-ca.pem"
+        # Export only the existing public certificate, even when the proxy is
+        # stopped or its executable is unavailable. Never create a second CA.
+        try:
+            pem = certificate.read_bytes()
+        except FileNotFoundError:
+            raise SystemExit(
+                f"Certificate not found: {certificate}\n"
+                "Start ArchiveBox Proxy and wait for 'ArchiveBox Proxy is ready'."
+            ) from None
+        except OSError as exc:
+            raise SystemExit(f"Could not read certificate: {exc}") from exc
+        try:
+            if args.export_ca == Path("-"):
+                sys.stdout.buffer.write(pem)
+            else:
+                args.export_ca.expanduser().write_bytes(pem)
+        except OSError as exc:
+            raise SystemExit(f"Could not export certificate: {exc}") from exc
+        return
     for action in options._actions:
         if action.choices and getattr(args, action.dest) not in action.choices:
             options.error(
                 f"PROXY_{action.dest.upper()} must be one of: {', '.join(action.choices)}"
             )
-    for name in ("record", "cache", "replay"):
+    for name in ("record", "cache", "replay", "verbose"):
         value = getattr(args, name)
         if isinstance(value, str):
             if value.lower() not in (
@@ -469,11 +727,53 @@ def main():
     if args.mode in ("reverse", "udp") and not args.target:
         raise SystemExit("--target is required for reverse and UDP modes")
     if args.mode == "wireguard" and not args.wireguard_endpoint:
-        raise SystemExit("--wireguard-endpoint is required for WireGuard mode")
+        if args.bind in ("0.0.0.0", "::"):
+            raise SystemExit(
+                "Set --wireguard-endpoint HOST:PORT so clients can reach this proxy"
+            )
+        args.wireguard_endpoint = address(args.bind, args.port)
+    if args.persona and not args.archivebox_dir:
+        raise SystemExit("--persona requires --archivebox DIRECTORY")
+    if args.archivebox_dir:
+        args.archivebox_dir = args.archivebox_dir.expanduser().resolve()
+    if args.archive is None:
+        args.archive = args.archivebox_dir
+    elif args.archive:
+        args.archive = args.archive.expanduser().resolve()
+    executable = shutil.which(args.engine)
+    if not executable:
+        raise SystemExit(
+            "ArchiveBox Proxy is missing its executable. Reinstall archivebox-proxy for this platform."
+        )
+    args.engine = executable
+    args.data = args.data.expanduser().resolve()
+    args.data.mkdir(parents=True, exist_ok=True)
+    os.chmod(args.data, 0o700)
+    file_log = RotatingFileHandler(
+        args.data / "proxy.log", maxBytes=16 * 1024**2, backupCount=1
+    )
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO if args.verbose else logging.WARNING)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    file_log.setFormatter(formatter)
+    console.setFormatter(formatter)
+    # Per-request logs stay available without synchronous file writes on the
+    # proxy event loop, or overwhelming the normal connection instructions.
+    log_queue = queue.SimpleQueue()
+    listener = QueueListener(log_queue, file_log, console, respect_handler_level=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        handlers=[QueueHandler(log_queue)],
+    )
+    listener.start()
     try:
         asyncio.run(serve(args))
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
-        raise SystemExit(str(exc)) from exc
+        raise SystemExit(f"{exc}\nLogs: {args.data / 'proxy.log'}") from exc
+    finally:
+        listener.stop()
+        file_log.close()
 
 
 if __name__ == "__main__":
