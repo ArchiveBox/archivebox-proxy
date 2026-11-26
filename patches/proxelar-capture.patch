@@ -1,0 +1,61 @@
+--- a/proxyapi/src/body.rs
++++ b/proxyapi/src/body.rs
+@@ -58,6 +58,10 @@
+         }
+     }
+ 
++    fn mark_truncated(&self) {
++        self.inner.lock().unwrap_or_else(|error| error.into_inner()).truncated = true;
++    }
++
+     pub(crate) fn snapshot(&self) -> BodySnapshot {
+         let state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+         BodySnapshot {
+@@ -98,6 +102,7 @@
+                 Poll::Ready(Some(Ok(frame)))
+             }
+             Poll::Ready(Some(Err(error))) => {
++                this.capture.mark_truncated();
+                 this.complete();
+                 Poll::Ready(Some(Err(error)))
+             }
+@@ -112,6 +117,18 @@
+ 
+ impl<F: FnOnce()> Drop for CaptureBody<F> {
+     fn drop(&mut self) {
++        // Completion callbacks also run when clients cancel a stream. Such a
++        // prefix is useful capture evidence, but must never be replayed as the
++        // complete response. Fixed-length bodies can finish without a final
++        // poll, including bodyless HEAD/204 responses discarded by serializers.
++        if self.on_complete.is_some() {
++            let mut state = self.capture.inner.lock().unwrap_or_else(|error| error.into_inner());
++            if self.inner.may_have_trailers()
++                || self.inner.exact_length() != Some(state.total_seen as u64)
++            {
++                state.truncated = true;
++            }
++        }
+         self.complete();
+     }
+ }
+--- a/proxyapi/src/handler.rs
++++ b/proxyapi/src/handler.rs
+@@ -866,6 +866,18 @@
+         let event_tx = self.event_tx_clone();
+         let response_capture = BodyCapture::new(self.body_capture_limit);
+         let response_capture_for_body = response_capture.clone();
++        let method = match request.as_ref() {
++            Some(CapturedRequest::Buffered(request)) => request.method(),
++            Some(CapturedRequest::Streaming { method, .. }) => method,
++            None => &http::Method::GET,
++        };
++        // Serializers legitimately discard bodyless responses without polling.
++        // Give capture the same framing knowledge so these are not cancellations.
++        let body = if proxelar_proto::response_body_is_forbidden(method, status) {
++            body.with_exact_length(0).with_trailer_hint(false)
++        } else {
++            body
++        };
+ 
+         let body = body::capture(body, response_capture, move || {
+             let Some(request) = request else {

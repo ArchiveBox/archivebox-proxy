@@ -1,0 +1,25 @@
+# docker compose -f compose.yaml -f compose.capture.yaml up --build
+services:
+  proxy:
+    build:
+      target: with-archivebox
+      args:
+        ARCHIVEBOX_IMAGE: ${ARCHIVEBOX_IMAGE:-archivebox/archivebox:0.9.78rc683}
+    image: archivebox-proxy:with-archivebox
+    environment:
+      ARCHIVEBOX_DATA: /data
+      PROXY_ARCHIVE: /archivebox
+    volumes:
+      # The normal CLI writes /data and replay reads /archivebox. Both processes
+      # share this container and UID, so these paths are not a security boundary.
+      - type: bind
+        source: ${ARCHIVEBOX_DATA:?Set ARCHIVEBOX_DATA to the initialized ArchiveBox collection}
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${ARCHIVEBOX_DATA:?Set ARCHIVEBOX_DATA to the initialized ArchiveBox collection}
+        target: /archivebox
+        read_only: true
+        bind:
+          create_host_path: false

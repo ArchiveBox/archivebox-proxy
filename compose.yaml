@@ -1,0 +1,39 @@
+services:
+  proxy:
+    build:
+      context: .
+      target: runtime
+    image: archivebox-proxy:local
+    restart: unless-stopped
+    # Published host addresses are separate from these container listeners.
+    command:
+      - --bind
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --worker-bind
+      - 0.0.0.0
+      - --worker-port
+      - "8082"
+    environment:
+      PROXY_RECORD: "${PROXY_RECORD:-true}"
+      PROXY_CACHE: "${PROXY_CACHE:-true}"
+      PROXY_REPLAY: "${PROXY_REPLAY:-true}"
+      PROXY_MODE: "${PROXY_MODE:-forward}"
+      PROXY_TARGET: "${PROXY_TARGET:-}"
+      PROXY_WIREGUARD_ENDPOINT: "${PROXY_WIREGUARD_ENDPOINT:-${WIREGUARD_ENDPOINT:-}}"
+      PROXY_DNS_UPSTREAM: "${PROXY_DNS_UPSTREAM:-1.1.1.1:53}"
+      PROXY_POLICY: "${PROXY_POLICY:-auto}"
+      PROXY_CACHE_GB: "${PROXY_CACHE_GB:-50}"
+      PROXY_BODY_LIMIT: "${PROXY_BODY_LIMIT:-67108864}"
+      PROXY_HOOK: "${PROXY_HOOK:-}"
+    ports:
+      - "${PROXY_BIND:-127.0.0.1}:${PROXY_PORT:-8080}:8080/tcp"
+      - "${PROXY_BIND:-127.0.0.1}:${PROXY_PORT:-8080}:8080/udp"
+      - "127.0.0.1:${PROXY_WORKER_PORT:-8082}:8082/tcp"
+    volumes:
+      - proxy-cache:/cache
+    stop_grace_period: 30s
+
+volumes:
+  proxy-cache:

@@ -1,0 +1,128 @@
+name: Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          version: "0.11.29"
+          python-version: "3.13"
+          enable-cache: true
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang cmake libclang-dev pkg-config
+      - name: Build pinned Proxelar engine
+        run: |
+          cargo fmt --check
+          uv run python bin/build_engine.py --locked
+          uv run python bin/build_engine.py --locked --clippy
+      - name: Install and check controller
+        run: |
+          uv sync --locked
+          uv run ruff check .
+          uv run pytest -v
+
+  container:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Validate deployment configuration
+        env:
+          ARCHIVEBOX_DATA: /tmp/archivebox
+        run: |
+          docker compose config --quiet
+          docker compose -f compose.yaml -f compose.archive.yaml config --quiet
+          docker compose -f compose.yaml -f compose.capture.yaml config --quiet
+      - name: Build proxy image
+        run: docker build --target runtime -t archivebox-proxy:ci .
+      - name: Exercise HTTPS cache in the container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name proxy -p 127.0.0.1:18880:8080 -p 127.0.0.1:18882:8082 archivebox-proxy:ci
+          trap 'docker logs proxy; docker rm -f -v proxy' EXIT
+          for _ in {1..100}; do
+            if docker cp proxy:/cache/trust.pem /tmp/proxy-ca.pem 2>/dev/null; then
+              break
+            fi
+            test "$(docker inspect --format '{{.State.Running}}' proxy)" = true
+            sleep 0.1
+          done
+          test -s /tmp/proxy-ca.pem
+          curl --noproxy '' --fail --silent --show-error --max-time 30 --cacert /tmp/proxy-ca.pem --proxy http://127.0.0.1:18880 https://news.ycombinator.com/ -o /tmp/first.html
+          curl --noproxy '' --fail --silent --show-error --max-time 30 --cacert /tmp/proxy-ca.pem --proxy http://127.0.0.1:18882 https://news.ycombinator.com/ -D /tmp/second.headers -o /tmp/second.html
+          cmp /tmp/first.html /tmp/second.html
+          grep -qi '^x-archivebox-proxy-cache: HIT' /tmp/second.headers
+          grep -q 'Hacker News' /tmp/second.html
+      - name: Build optional ArchiveBox CLI image
+        run: |
+          docker build --target with-archivebox -t archivebox-proxy:with-archivebox .
+          docker run --rm --entrypoint archivebox archivebox-proxy:with-archivebox version
+      - name: Exercise automatic ArchiveBox capture
+        shell: bash
+        run: |
+          set -euo pipefail
+          capture_evidence=$(mktemp -d)
+          capture_collection=$(docker volume create)
+          trap 'docker logs archivebox-capture || true; docker exec archivebox-capture cat /cache/hooks.log || true; docker rm -f -v archivebox-capture || true; docker volume rm "$capture_collection"' EXIT
+          docker run --rm --mount "type=volume,source=$capture_collection,target=/data" --entrypoint archivebox archivebox-proxy:with-archivebox init
+          docker run -d --name archivebox-capture --mount "type=volume,source=$capture_collection,target=/data" --mount "type=volume,source=$capture_collection,target=/archivebox,readonly" -e PLUGINS=screenshot,title,headers -p 127.0.0.1:18880:8080 archivebox-proxy:with-archivebox --bind 0.0.0.0 --archivebox-dir /data --archive /archivebox
+          for _ in {1..100}; do
+            if docker cp archivebox-capture:/cache/trust.pem "$capture_evidence/ca.pem" 2>/dev/null; then
+              break
+            fi
+            test "$(docker inspect --format '{{.State.Running}}' archivebox-capture)" = true
+            sleep 0.1
+          done
+          test -s "$capture_evidence/ca.pem"
+          curl --noproxy '' --fail --silent --show-error --max-time 30 --cacert "$capture_evidence/ca.pem" --proxy http://127.0.0.1:18880 -H 'Accept-Encoding: gzip, deflate, br, zstd' -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-Dest: document' https://news.ycombinator.com/ask -o /dev/null
+          for _ in {1..180}; do
+            if docker cp archivebox-capture:/cache/hooks.jsonl "$capture_evidence/hooks.jsonl" 2>/dev/null; then
+              if jq -e 'select(.event == "finish" and .returncode == 0)' "$capture_evidence/hooks.jsonl" >/dev/null; then
+                break
+              fi
+              if jq -e 'select(.event == "error" or (.event == "finish" and .returncode != 0))' "$capture_evidence/hooks.jsonl" >/dev/null; then
+                exit 1
+              fi
+            fi
+            test "$(docker inspect --format '{{.State.Running}}' archivebox-capture)" = true
+            sleep 1
+          done
+          jq -e 'select(.event == "finish" and .returncode == 0)' "$capture_evidence/hooks.jsonl" >/dev/null
+          docker exec -i archivebox-capture uv run --no-project python - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path('/data/archive')
+          screenshots = list(root.rglob('screenshot/screenshot.png'))
+          assert len(screenshots) == 1, screenshots
+          assert screenshots[0].read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
+          assert screenshots[0].stat().st_size > 10000
+          snapshot = screenshots[0].parent.parent
+          assert 'Hacker News' in (snapshot / 'title/title.txt').read_text()
+          response = json.loads((snapshot / 'headers/headers.json').read_text())
+          assert response['status'] == 200
+          assert response['response_headers']['x-archivebox-proxy-cache'] == 'HIT'
+          assert (Path('/archivebox') / screenshots[0].relative_to('/data')).is_file()
+          assert len(Path('/cache/navigations.jsonl').read_text().splitlines()) == 1
+          print('Automatic ArchiveBox capture saved screenshot, title, and cache HIT headers.')
+          PY
