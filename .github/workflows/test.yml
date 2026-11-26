@@ -27,7 +27,11 @@ jobs:
           python-version: "3.13"
           enable-cache: true
       - name: Install native build dependencies
-        run: sudo apt-get update && sudo apt-get install -y clang cmake libclang-dev pkg-config
+        # These packages come from Ubuntu. Unrelated preinstalled repositories
+        # (e.g. Microsoft's returning 403) must not block their index refresh.
+        run: |
+          sudo apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=-
+          sudo apt-get install -y clang cmake libclang-dev pkg-config
       - name: Build pinned Proxelar engine
         run: |
           cargo fmt --check

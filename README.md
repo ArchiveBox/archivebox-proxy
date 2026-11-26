@@ -66,7 +66,7 @@ Look for **ArchiveBox Proxy is ready**, then [connect your browser](#configuring
 **Archive pages as you browse:** [install ArchiveBox and initialize a collection](https://github.com/ArchiveBox/ArchiveBox#quickstart), then select it:
 
 ```bash
-archivebox-proxy --socks --archivebox ~/archivebox
+archivebox-proxy --socks --archivebox ~/archivebox/data
 ```
 
 For authenticated pages, add `--persona NAME` to use the same saved session as your browser. Captures reuse the proxy cache, and saved snapshots become available for replay.
