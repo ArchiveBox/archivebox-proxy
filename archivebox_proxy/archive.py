@@ -443,9 +443,7 @@ def _requests(source, size, modified):
     requests = []
     with zipfile.ZipFile(source) as archive:
         for name in archive.namelist():
-            if not name.startswith("archive/") or not name.endswith(
-                (".warc", ".warc.gz")
-            ):
+            if not name.endswith((".warc", ".warc.gz")):
                 continue
             with archive.open(name) as stream:
                 for record in ArchiveIterator(stream, no_record_parse=True):

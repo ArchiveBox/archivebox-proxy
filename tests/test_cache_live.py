@@ -102,3 +102,55 @@ def test_cached_204_has_no_body_or_content_length(tmp_path):
         assert all(name.lower() != "content-length" for name, _ in stored)
     finally:
         proxy.close()
+
+
+def test_local_replay_failure_does_not_replace_origin_response(tmp_path):
+    proxy = Proxy(tmp_path / "cache")
+    url = "https://httpbingo.org/status/200"
+    try:
+        proxy.fetch(url)
+        fields, _ = proxy.fetch(url, worker=True)
+        assert b"x-archivebox-proxy-cache: HIT" in fields
+        with sqlite3.connect(proxy.data / "cache.sqlite3") as db:
+            key, raw = db.execute("SELECT key,headers FROM responses").fetchone()
+            # Corrupt a real cached response's header name. Local HTTP replay
+            # must fail without recording its generated 504 as the origin body.
+            fields = json.loads(raw) + [["Invalid\nName", "value"]]
+            db.execute(
+                "UPDATE responses SET headers=? WHERE key=?", (json.dumps(fields), key)
+            )
+        command = [
+            "curl",
+            "--noproxy",
+            "",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "30",
+            "--proxy",
+            f"http://127.0.0.1:{proxy.worker}",
+            "--cacert",
+            str(proxy.data / "ca/proxelar-ca.pem"),
+            "--include",
+        ]
+        failure = subprocess.run(command + [url], capture_output=True, check=True)
+        assert b"504" in failure.stdout
+        assert b"x-archivebox-proxy-cache: ERROR" in failure.stdout
+        assert proxy.process.poll() is None
+
+        # Real upstream failures still follow the requested cache-everything
+        # policy; only failures generated inside this proxy are excluded.
+        error_url = "https://httpbingo.org/status/503"
+        first = subprocess.run(command + [error_url], capture_output=True, check=True)
+        repeated = subprocess.run(
+            command + [error_url], capture_output=True, check=True
+        )
+        assert b"503" in first.stdout and b"503" in repeated.stdout
+        assert b"x-archivebox-proxy-cache: ERROR" not in first.stdout
+        assert b"x-archivebox-proxy-cache: HIT" in repeated.stdout
+    finally:
+        proxy.close()
+    with sqlite3.connect(proxy.data / "cache.sqlite3") as db:
+        assert db.execute(
+            "SELECT status FROM responses WHERE key=?", (key,)
+        ).fetchone() == (200,)

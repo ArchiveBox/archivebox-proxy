@@ -15,5 +15,6 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 bytes = "1"
 base64 = "0.22"
+tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

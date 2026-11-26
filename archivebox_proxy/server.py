@@ -197,11 +197,12 @@ class Controller:
             )
             request, response = flow["request"], flow["response"]
             if any(
-                k.lower() == "x-archivebox-proxy-cache" and v == "HIT"
+                k.lower() == "x-archivebox-proxy-cache" and v in ("HIT", "ERROR")
                 for k, v in headers(response)
             ):
                 # Synthetic replay also emits RequestComplete. Re-storing it
                 # would extend its TTL on every hit instead of expiring it.
+                # Local proxy failures must not replace an origin capture either.
                 return web.Response(status=204)
             if any(
                 m.get("body_metadata", {}).get("truncated") for m in (request, response)
@@ -284,7 +285,9 @@ class Controller:
         @web.middleware
         async def auth(request, handler):
             if not request.path.startswith("/replay/") and not secrets.compare_digest(
-                request.headers.get("Authorization", "").encode(),
+                request.headers.get("Authorization", "").encode(
+                    "utf8", "surrogateescape"
+                ),
                 f"Bearer {self.token}".encode(),
             ):
                 raise web.HTTPUnauthorized()

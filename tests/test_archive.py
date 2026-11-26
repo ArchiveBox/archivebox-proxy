@@ -9,6 +9,7 @@ import gzip
 import hashlib
 import json
 import shutil
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -121,11 +122,22 @@ def test_malformed_loose_url_does_not_abort_other_records(tmp_path):
 
 
 @pytest.mark.parametrize("capture", ["wget", "archivewebpage-post"])
-def test_real_post_pair_with_both_record_orders(tmp_path, capture):
+@pytest.mark.parametrize("root_members", [False, True])
+def test_real_post_pair_with_both_record_orders(tmp_path, capture, root_members):
     # Real httpbingo POST captures from 2026-11-26: Wget records the request
     # before the response; ArchiveWeb.page records it afterward. Each puts
     # Concurrent-To on the later record, so both association directions matter.
-    archive, _ = make_archive(tmp_path, capture)
+    archive, root = make_archive(tmp_path, capture)
+    if root_members:
+        path = next(root.glob("**/*.wacz"))
+        # Relocate the genuine recorded WARC bytes without rewriting records or
+        # indexes. These CDX filename fields already refer to member basenames.
+        with zipfile.ZipFile(path) as source:
+            members = [(name, source.read(name)) for name in source.namelist()]
+        with zipfile.ZipFile(path, "w") as target:
+            for name, data in members:
+                target.writestr(name.removeprefix("archive/"), data)
+        archive.refresh()
     req = request(
         url="https://httpbingo.org/status/200",
         method="POST",

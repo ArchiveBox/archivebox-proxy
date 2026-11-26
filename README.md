@@ -18,9 +18,32 @@
 
 </div>
 
-[![An authenticated X Likes page preserved in ArchiveBox, with replay, screenshots, and downloaded images](docs/images/archivebox-likes.png)](docs/images/archivebox-likes.png)
+<table>
+<tr>
+<th width="42%">① Your browser</th>
+<th width="16%">② Proxelar</th>
+<th width="42%">③ ArchiveBox</th>
+</tr>
+<tr>
+<td valign="middle"><a href="docs/images/visitor-likes.png"><img src="docs/images/visitor-likes.png" width="100%" alt="The original authenticated X Likes session after scrolling" /></a></td>
+<td align="center" valign="middle">
+<strong>→ Cache responses</strong><br><br>
+<strong>Navigation hook →</strong><br>
+<code>archivebox add</code><br>
+<code>--depth=0 URL</code><br><br>
+<strong>← Capture requests</strong><br>
+<sub>Reuse the same cache</sub>
+</td>
+<td valign="middle"><a href="docs/images/archivebox-likes.png"><img src="docs/images/archivebox-likes.png" width="100%" alt="The resulting ArchiveBox snapshot with preserved X posts and images" /></a></td>
+</tr>
+<tr>
+<td align="center"><sub>Browse and scroll to populate the cache.</sub></td>
+<td align="center"><sub>Cache misses go upstream.</sub></td>
+<td align="center"><sub>ArchiveBox runs its normal capture and saves the snapshot.</sub></td>
+</tr>
+</table>
 
-<p align="center"><sub>A real X Likes session, captured automatically through the proxy and opened in ArchiveBox.</sub></p>
+<p align="center"><sub>One real X Likes visit → automatic capture through the same proxy → an ArchiveBox snapshot ready to replay.</sub></p>
 
 - 🌐 **Browse normally.** Your visits populate a shared HTTP/HTTPS response cache through [Proxelar](https://github.com/emanuele-em/proxelar).
 - 📸 **Archive automatically.** Top-level navigations trigger normal [ArchiveBox](https://github.com/ArchiveBox/ArchiveBox) captures, with your plugins and authentication persona.
@@ -229,21 +252,6 @@ Bodies are content-addressed on disk with SQLite metadata. Truncated or incomple
 ## Comments
 
 **A real authenticated capture:** the visitor scrolled four times through X Likes using the **Socials Only** persona. The navigation hook launched a normal ArchiveBox capture with the same persona, and the resulting WACZ loaded in replay.
-
-<table>
-<tr>
-<th width="50%">① Browse through the proxy</th>
-<th width="50%">② Open the ArchiveBox snapshot</th>
-</tr>
-<tr>
-<td valign="top"><a href="docs/images/visitor-likes.png"><img src="docs/images/visitor-likes.png" width="100%" alt="The original authenticated X Likes session after scrolling" /></a></td>
-<td valign="top"><a href="docs/images/archivebox-likes.png"><img src="docs/images/archivebox-likes.png" width="100%" alt="The resulting ArchiveBox snapshot with preserved X posts and images" /></a></td>
-</tr>
-<tr>
-<td align="center"><sub>The human visit populates the cache.</sub></td>
-<td align="center"><sub>ArchiveBox captures through the same proxy and reuses those responses.</sub></td>
-</tr>
-</table>
 
 | Observed during that capture | Result |
 | --- | --- |

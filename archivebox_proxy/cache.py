@@ -1,6 +1,7 @@
 """Content-addressed bodies and rebuildable metadata, independent of ArchiveBox."""
 
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -8,6 +9,7 @@ import re
 import sqlite3
 import threading
 import time
+from contextlib import ExitStack
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urldefrag
@@ -209,27 +211,51 @@ class Cache:
         path = self.blobs / name
         import tempfile
 
-        # Staging files live outside bodies/ so pruning cannot remove an active
-        # writer. Publish complete bytes and metadata together under files_lock;
-        # neither disk writes nor fsync hold SQLite's lock or a transaction.
-        with tempfile.NamedTemporaryFile(dir=self.root, delete=False) as f:
+        now = time.time()
+        metadata = (
+            key,
+            name,
+            status,
+            json.dumps(response_headers(fields, len(payload), method, status)),
+            len(payload),
+            expiry(fields, now),
+            now,
+        )
+        with ExitStack() as staging:
+            with self.files_lock:
+                # Content-addressed bodies are immutable. A second URL or concurrent
+                # capture may reuse the bytes without another disk write or fsync.
+                if path.is_file() and path.stat().st_size == len(payload):
+                    with self.lock:
+                        self.db.execute(
+                            "INSERT OR REPLACE INTO responses VALUES (?,?,?,?,?,?,?)",
+                            metadata,
+                        )
+                        self.db.commit()
+                    return True
+                # Acquire the advisory lock before prune can see a new staging file.
+                # Kernel locks disappear on SIGKILL, including across container
+                # restarts that reuse the same PID, so cleanup needs no PID guesses.
+                staged = staging.enter_context(
+                    tempfile.NamedTemporaryFile(
+                        dir=self.root, prefix=".tmp-", delete=False
+                    )
+                )
+                fcntl.flock(staged.fileno(), fcntl.LOCK_EX)
+            # Staging files live outside bodies/ so pruning cannot remove an active
+            # writer. Publish complete bytes and metadata together under files_lock;
+            # neither disk writes nor fsync hold SQLite's lock or a transaction.
+            f = staged
             temp = Path(f.name)
             try:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
-                now = time.time()
-                metadata = (
-                    key,
-                    name,
-                    status,
-                    json.dumps(response_headers(fields, len(payload), method, status)),
-                    len(payload),
-                    expiry(fields, now),
-                    now,
-                )
                 with self.files_lock:
-                    os.replace(temp, path)
+                    # A concurrent writer may have published the same digest
+                    # while this one staged it; keep that existing complete file.
+                    if not path.is_file() or path.stat().st_size != len(payload):
+                        os.replace(temp, path)
                     with self.lock:
                         self.db.execute(
                             "INSERT OR REPLACE INTO responses VALUES (?,?,?,?,?,?,?)",
@@ -274,6 +300,16 @@ class Cache:
             for path in self.blobs.iterdir():
                 if path.name not in kept:
                     path.unlink(missing_ok=True)
+            for path in self.root.glob(".tmp-*"):
+                try:
+                    with path.open("rb") as staged:
+                        try:
+                            fcntl.flock(staged.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        except BlockingIOError:
+                            continue  # A live writer still owns its staging file.
+                        path.unlink(missing_ok=True)
+                except FileNotFoundError:
+                    pass  # The writer completed before cleanup opened the file.
 
     def enqueue(self, url, delay=10):
         with self.lock:

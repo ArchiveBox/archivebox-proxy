@@ -66,7 +66,15 @@ def test_independent_environment_controls(tmp_path, record, caching, replay):
                     break
                 time.sleep(0.05)
             else:
-                raise AssertionError((proxy.data / "hooks.log").read_text())
+                log = proxy.data / "hooks.log"
+                raise AssertionError(
+                    (
+                        row,
+                        log.read_text()
+                        if log.exists()
+                        else "No hook output was created",
+                    )
+                )
             assert output.read_bytes() == original
         else:
             assert not output.exists()

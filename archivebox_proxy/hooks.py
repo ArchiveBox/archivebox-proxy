@@ -22,6 +22,15 @@ def append_log(path, data, *, sync=False):
             os.fsync(output.fileno())
 
 
+async def wait_exit(process):
+    # asyncio Process.wait() can wait for pipe EOF after the leader has exited.
+    # An explicitly detached descendant may retain stdout, so watch the leader's
+    # actual exit independently. This puts no deadline on a running hook.
+    while process.returncode is None:
+        await asyncio.sleep(0.05)
+    return process.returncode
+
+
 async def stop_process(process, grace=10):
     """Stop a hook's group even when its leader exits before its descendants."""
     try:
@@ -32,7 +41,7 @@ async def stop_process(process, grace=10):
     except ProcessLookupError:
         pass
     try:
-        await asyncio.wait_for(process.wait(), grace)
+        await asyncio.wait_for(wait_exit(process), grace)
     except TimeoutError:
         pass
     finally:
@@ -45,7 +54,7 @@ async def stop_process(process, grace=10):
                 process.kill()
         except ProcessLookupError:
             pass
-        await process.wait()
+        await asyncio.wait_for(wait_exit(process), grace)
 
 
 class HookRunner:
@@ -110,8 +119,10 @@ class HookRunner:
 
     async def execute(self, url):
         error, started = None, False
+        process, argv = None, None
         try:
             for command in self.commands:
+                process = None
                 argv = [argument.replace("{url}", url) for argument in command]
                 await asyncio.to_thread(
                     self.report, url=url, command=argv, event="start"
@@ -136,10 +147,13 @@ class HookRunner:
                     process = await asyncio.shield(spawn)
                 except asyncio.CancelledError:
                     process = await spawn
-                    await stop_process(process)
+                    try:
+                        await stop_process(process)
+                    finally:
+                        process._transport.close()
                     raise
                 output = asyncio.create_task(self.output(process))
-                waiter = asyncio.create_task(process.wait())
+                waiter = asyncio.create_task(wait_exit(process))
                 try:
                     done, _ = await asyncio.wait(
                         (output, waiter), return_when=asyncio.FIRST_COMPLETED
@@ -148,8 +162,23 @@ class HookRunner:
                         task.result()
                     code = await waiter
                 finally:
-                    await stop_process(process)
-                    await asyncio.gather(output, waiter)
+                    try:
+                        await stop_process(process)
+                        # Cleanup alone is bounded: detached children can hold
+                        # the pipe forever after the hook leader has finished.
+                        try:
+                            await asyncio.wait_for(asyncio.shield(output), 1)
+                        except TimeoutError:
+                            LOG.warning(
+                                "Closing hook output still open after exit: %s", argv[0]
+                            )
+                    finally:
+                        # StreamReader exposes no public close(). Closing its
+                        # subprocess transport releases inherited output pipes.
+                        process._transport.close()
+                        output.cancel()
+                        waiter.cancel()
+                        await asyncio.gather(output, waiter, return_exceptions=True)
                 await asyncio.to_thread(
                     self.report, url=url, command=argv, event="finish", returncode=code
                 )
@@ -161,6 +190,16 @@ class HookRunner:
                 if started
                 else None
             )
+            try:
+                await asyncio.to_thread(
+                    self.report,
+                    url=url,
+                    command=argv,
+                    event="interrupted",
+                    returncode=process.returncode if process else None,
+                )
+            except Exception:
+                LOG.exception("Could not write hook interruption event")
             raise
         except Exception as exc:
             error = str(exc)
@@ -173,7 +212,9 @@ class HookRunner:
                 LOG.exception("Could not write hook error event")
         finally:
             try:
-                await asyncio.to_thread(self.finish, url, error, release=not started)
+                await asyncio.to_thread(
+                    self.finish, url, error, release=not started and error is None
+                )
             except Exception:
                 LOG.exception("Could not update hook queue")
 

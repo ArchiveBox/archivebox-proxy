@@ -3,6 +3,8 @@
 import hashlib
 import json
 import sqlite3
+import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -113,6 +115,8 @@ def test_parallel_publication_and_prune_keep_complete_blobs(tmp_path):
         for future in futures:
             future.result()
     cache.prune()
+    files = list(cache.blobs.iterdir())
+    assert sum(path.stat().st_size for path in files) <= cache.max_bytes
     for filename, size in cache.db.execute(
         "SELECT filename,size FROM responses"
     ).fetchall():
@@ -120,4 +124,68 @@ def test_parallel_publication_and_prune_keep_complete_blobs(tmp_path):
         assert len(payload) == size
         assert hashlib.sha256(payload).hexdigest() == filename
     assert not cache.db.in_transaction
+    # Concurrent pruning may legitimately evict either writer before its get.
+    # Once pruning stops, require both real payloads to replay in their entirety.
+    for number, payload in enumerate(payloads):
+        assert cache.put(f"final-{number}", 200, [], payload)
+        hit = cache.get(f"final-{number}", open_body=True)
+        assert hit is not None
+        with hit["stream"] as stream:
+            assert stream.read() == payload
     cache.close()
+
+
+def test_existing_body_is_reused_without_replacing_file(tmp_path):
+    cache = Cache(tmp_path)
+    assert cache.put("first", 200, [], PAYLOAD)
+    path = cache.get("first")["path"]
+    before = path.stat()
+    assert cache.put("second", 200, [("Content-Type", "image/svg+xml")], PAYLOAD)
+    after = path.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    assert cache.get("second")["headers"] == [
+        ["Content-Type", "image/svg+xml"],
+        ["Content-Length", str(len(PAYLOAD))],
+    ]
+    cache.close()
+
+
+def test_prune_cleans_killed_writer_staging_but_preserves_live_writer(tmp_path):
+    cache = Cache(tmp_path)
+    # Use a real process-held lock: the kernel releases it after SIGKILL,
+    # including when a restarted container would reuse the same numeric PID.
+    writer = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import fcntl,sys,tempfile; from pathlib import Path; "
+                "f=tempfile.NamedTemporaryFile(dir=sys.argv[1], "
+                "prefix='.tmp-', delete=False); "
+                "fcntl.flock(f.fileno(),fcntl.LOCK_EX); "
+                "f.write(Path(sys.argv[2]).read_bytes()); f.flush(); "
+                "print(f.name,flush=True); sys.stdin.read()"
+            ),
+            str(tmp_path),
+            str(next((FIXTURES / "responses/all").iterdir())),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        path = Path(writer.stdout.readline().strip())
+        assert path.read_bytes() == PAYLOAD
+        cache.prune()
+        assert path.read_bytes() == PAYLOAD
+        writer.kill()
+        assert writer.wait(timeout=10) != 0
+        cache.prune()
+        assert not path.exists()
+    finally:
+        if writer.poll() is None:
+            writer.kill()
+            writer.wait(timeout=10)
+        writer.stdin.close()
+        writer.stdout.close()
+        cache.close()

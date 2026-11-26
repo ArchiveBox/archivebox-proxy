@@ -11,7 +11,21 @@
  }
 --- a/proxyapi/src/handler.rs
 +++ b/proxyapi/src/handler.rs
-@@ -655,16 +655,22 @@
+@@ -356,6 +356,13 @@
+     let mut builder = Response::builder().status(status);
+     if let Some(response_headers) = builder.headers_mut() {
+         *response_headers = headers;
++        // Locally generated failures describe the proxy, not an upstream
++        // capture. Keep them out of persistent replay; valid ordered cache
++        // responses replace these headers with their original HIT metadata.
++        if status.is_server_error() {
++            response_headers.insert("x-archivebox-proxy-cache",
++                http::HeaderValue::from_static("ERROR"));
++        }
+     }
+ 
+     builder
+@@ -655,16 +662,22 @@
                      .unwrap()
                      .into_proxied_request();
                  let rx = cfg.register(id);
@@ -41,7 +55,7 @@
                  } else {
                      match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
                          Ok(Ok(InterceptDecision::Forward)) => {}
-@@ -695,6 +701,19 @@
+@@ -695,6 +708,19 @@
                                      now_millis(),
                                  )));
                          }
@@ -61,7 +75,7 @@
                          Ok(Ok(InterceptDecision::Block { status, body })) => {
                              let status_code = http::StatusCode::from_u16(status)
                                  .unwrap_or(http::StatusCode::BAD_GATEWAY);
-@@ -745,7 +764,6 @@
+@@ -745,7 +771,6 @@
          response_to_protocol(self.synthetic_response(status, headers, body))
      }
  
@@ -69,7 +83,7 @@
      fn synthetic_ordered_response(
          &mut self,
          status: http::StatusCode,
-@@ -1296,11 +1314,16 @@
+@@ -1296,11 +1321,16 @@
                      id,
                      request: Box::new(snapshot.clone()),
                  };
@@ -91,7 +105,7 @@
                  } else {
                      self.captured_request = Some(CapturedRequest::buffered(snapshot));
  
-@@ -1341,6 +1364,20 @@
+@@ -1341,6 +1371,20 @@
                                  );
                              }
                              request_body.apply_modified_body(&hook_body, body);

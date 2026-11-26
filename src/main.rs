@@ -199,7 +199,7 @@ async fn dispatch(
                         // An expired ticket or interrupted local body affects
                         // this request only. Never forward it behind an offline
                         // policy, and keep unrelated browser traffic running.
-                        eprintln!("Replay failed for request {id}: {error}");
+                        tracing::warn!(request_id = id, %error, "Local replay failed");
                         InterceptDecision::Block {
                             status: 504,
                             body: bytes::Bytes::from_static(b"Archive replay unavailable"),
