@@ -19,33 +19,31 @@
 
 <table>
 <tr>
-<th width="42%">① Your browser</th>
-<th width="16%">② Proxy</th>
-<th width="42%">③ ArchiveBox</th>
-</tr>
-<tr>
-<td valign="middle"><a href="https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/visitor-likes.png"><img src="https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/visitor-likes.png" width="100%" alt="The original authenticated X Likes session after scrolling" /></a></td>
-<td align="center" valign="middle">
-<strong>→ Cache</strong><br><br>
-<strong>Hook →</strong><br><br>
-<strong>← Capture requests</strong><br>
-<sub>Reuse cache</sub>
+<td width="40%" align="center" valign="middle">
+<strong>🧑‍💻 Your browser</strong><br><br>
+<a href="https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/visitor-likes.png"><img src="https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/visitor-likes.png" width="100%" alt="Your browser visiting X Likes" /></a>
 </td>
-<td valign="middle"><a href="https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/archivebox-likes.png"><img src="https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/archivebox-likes.png" width="100%" alt="The resulting ArchiveBox snapshot with preserved X posts and images" /></a></td>
+<td width="5%" align="center">↔️</td>
+<td width="30%" align="center" valign="middle">
+<strong>⚡️ archivebox-proxy</strong><br><br>
+<sub>📦 Cache · ⏪ Replay</sub>
+</td>
+<td width="5%" align="center">➡️</td>
+<td width="20%" align="center" valign="middle"><strong>🌐 The internet</strong></td>
 </tr>
 <tr>
-<td align="center"><sub>Browse and scroll to populate the cache.</sub></td>
-<td align="center"><sub>Cache → archive → upstream</sub></td>
-<td align="center"><sub>ArchiveBox runs its normal capture and saves the snapshot.</sub></td>
+<td colspan="2"></td>
+<td align="center">⬇️ ⬆️<br><sub>📸 Capture · ⏪ Replay</sub></td>
+<td colspan="2"></td>
+</tr>
+<tr>
+<td colspan="2"></td>
+<td colspan="3" align="center">
+<strong>🗃️ ArchiveBox</strong><br><br>
+<a href="https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/archivebox-likes.png"><img src="https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/archivebox-likes.png" width="100%" alt="ArchiveBox snapshot with the captured X posts and images" /></a>
+</td>
 </tr>
 </table>
-
-<p align="center"><sub>Browse through the proxy. ArchiveBox saves your visits in the background and reuses what your browser already downloaded.</sub></p>
-
-- 🌐 **Browse normally.** Your visits populate the HTTP/HTTPS response cache.
-- 📸 **Archive automatically.** Top-level navigations trigger normal [ArchiveBox](https://github.com/ArchiveBox/ArchiveBox) captures, with your plugins and authentication persona.
-- ⚡ **Reuse what you already downloaded.** ArchiveBox reads through the same cache; additional resources go upstream through the same proxy.
-- ⏪ **Replay from your collection.** Browse saved content from your ArchiveBox collection when it is available.
 
 ## Installation
 
