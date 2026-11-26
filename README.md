@@ -17,34 +17,7 @@
 
 </div>
 
-<table>
-<tr>
-<td width="40%" align="center" valign="middle">
-<strong>🧑‍💻 Your browser</strong><br><br>
-<a href="https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/visitor-likes.png"><img src="https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/visitor-likes.png" width="100%" alt="Your browser visiting X Likes" /></a>
-</td>
-<td width="5%" align="center">↔️</td>
-<td width="30%" align="center" valign="middle">
-<strong>⚡️ archivebox-proxy</strong><br><br>
-<sub>📦 Cache · ⏪ Replay</sub>
-</td>
-<td width="5%" align="center">➡️</td>
-<td width="20%" align="center" valign="middle"><strong>🌐 The internet</strong></td>
-</tr>
-<tr>
-<td colspan="2"></td>
-<td align="center">⬇️ ⬆️<br><sub>📸 Capture · ⏪ Replay</sub></td>
-<td colspan="2"></td>
-</tr>
-<tr>
-<td></td>
-<td colspan="3" align="center">
-<strong>🗃️ ArchiveBox</strong><br><br>
-<a href="https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/archivebox-likes.png"><img src="https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/archivebox-likes.png" width="100%" alt="ArchiveBox snapshot with the captured X posts and images" /></a>
-</td>
-<td></td>
-</tr>
-</table>
+<a href="https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/overview.svg"><img src="https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/overview.svg" width="100%" alt="Your browser exchanges traffic with archivebox-proxy, which caches responses, fetches missing resources from the internet, and queues ArchiveBox captures through the same cache." /></a>
 
 ## Installation
 
