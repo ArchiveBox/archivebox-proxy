@@ -1,0 +1,38 @@
+# docker compose -f compose.yaml -f compose.capture.yaml up --build
+services:
+  proxy:
+    build:
+      target: with-archivebox
+      args:
+        ARCHIVEBOX_IMAGE: ${ARCHIVEBOX_IMAGE:-archivebox/archivebox:0.9.77}
+    image: archivebox-proxy:with-archivebox
+    command:
+      - --bind
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --worker-bind
+      - 0.0.0.0
+      - --worker-port
+      - "8082"
+      - --mode
+      - ${PROXY_MODE:-forward}
+      - --wireguard-endpoint
+      - ${WIREGUARD_ENDPOINT:-127.0.0.1:8080}
+      - --policy
+      - ${PROXY_POLICY:-auto}
+      - --cache-gb
+      - ${PROXY_CACHE_GB:-50}
+      - --archivebox-dir
+      - /data
+      - --archive
+      - /archivebox
+    volumes:
+      # Only the normal ArchiveBox CLI writes this initialized collection.
+      - type: bind
+        source: ${ARCHIVEBOX_DATA:?Set ARCHIVEBOX_DATA to the initialized ArchiveBox collection}
+        target: /data
+      - type: bind
+        source: ${ARCHIVEBOX_DATA:?Set ARCHIVEBOX_DATA to the initialized ArchiveBox collection}
+        target: /archivebox
+        read_only: true

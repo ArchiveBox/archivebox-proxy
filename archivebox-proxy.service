@@ -1,22 +1,19 @@
-# systemctl service config file
-# port 8080
-
 [Unit]
-Description=archivebox-proxy
-After=network.target
-StartLimitIntervalSec=0
+Description=ArchiveBox caching proxy
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-Restart=always
-RestartSec=1
-
-User=user
-Group=user
-WorkingDirectory=/home/user/archivebox-proxy/
-ExecStart=pipenv run mitmdump -s archivebox-proxy.py \'!~a\'
+DynamicUser=yes
+StateDirectory=archivebox-proxy
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/archivebox-proxy
+ExecStart=/opt/archivebox-proxy/.venv/bin/archivebox-proxy --engine /usr/local/bin/archivebox-proxy-engine --data /var/lib/archivebox-proxy --bind 0.0.0.0 --port 8080 --worker-port 8082
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=30s
 
 [Install]
 WantedBy=multi-user.target
-
-# sudo ln -sv /home/user/archivebox-proxy/archivebox-proxy.service /etc/systemd/system/archivebox-proxy.service

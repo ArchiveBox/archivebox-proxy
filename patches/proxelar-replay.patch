@@ -1,0 +1,122 @@
+--- a/proxyapi/src/intercept.rs
++++ b/proxyapi/src/intercept.rs
+@@ -23,6 +23,8 @@
+         headers: HeaderBlock,
+         body: Bytes,
+     },
++    /// Return a captured response without opening an upstream connection.
++    Respond { status: u16, headers: HeaderBlock, body: Bytes },
+     /// Drop the request and return a synthetic response to the client.
+     Block { status: u16, body: Bytes },
+ }
+--- a/proxyapi/src/handler.rs
++++ b/proxyapi/src/handler.rs
+@@ -657,14 +657,16 @@
+                 let rx = cfg.register(id);
+                 if self
+                     .event_tx
+-                    .try_send(ProxyEvent::RequestIntercepted {
++                    .send(ProxyEvent::RequestIntercepted {
+                         id,
+                         request: Box::new(snapshot),
+                     })
++                    .await
+                     .is_err()
+                 {
+-                    cfg.resolve(id, InterceptDecision::Forward);
+-                    tracing::warn!("Event channel full, skipping intercept for replay id={id}");
++                    cfg.resolve(id, InterceptDecision::Block { status: 503, body: Bytes::new() });
++                    tracing::warn!("Event channel closed for replay id={id}");
++                    return None;
+                 } else {
+                     match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
+                         Ok(Ok(InterceptDecision::Forward)) => {}
+@@ -695,6 +697,12 @@
+                                     now_millis(),
+                                 )));
+                         }
++                        Ok(Ok(InterceptDecision::Respond { status, headers, body })) => {
++                            let status_code = http::StatusCode::from_u16(status)
++                                .unwrap_or(http::StatusCode::BAD_GATEWAY);
++                            let _ = self.synthetic_ordered_response(status_code, headers, body);
++                            return None;
++                        }
+                         Ok(Ok(InterceptDecision::Block { status, body })) => {
+                             let status_code = http::StatusCode::from_u16(status)
+                                 .unwrap_or(http::StatusCode::BAD_GATEWAY);
+@@ -745,7 +753,6 @@
+         response_to_protocol(self.synthetic_response(status, headers, body))
+     }
+ 
+-    #[cfg(feature = "scripting")]
+     fn synthetic_ordered_response(
+         &mut self,
+         status: http::StatusCode,
+@@ -1284,11 +1291,15 @@
+                     id,
+                     request: Box::new(snapshot.clone()),
+                 };
+-                // Non-blocking send: if the channel is full, skip interception
+-                // and fall through to normal forwarding so the request isn't lost.
+-                if self.event_tx.try_send(event).is_err() {
+-                    cfg.resolve(id, InterceptDecision::Forward);
+-                    tracing::warn!("Event channel full, skipping intercept for id={id}");
++                // Interception enforces replay policy. Backpressure must never
++                // turn a full controller queue into an upstream request.
++                if self.event_tx.send(event).await.is_err() {
++                    cfg.resolve(id, InterceptDecision::Block { status: 503, body: Bytes::new() });
++                    return CompatRequestOrResponse::Response(self.synthetic_response(
++                        http::StatusCode::SERVICE_UNAVAILABLE,
++                        http::HeaderMap::new(),
++                        Bytes::new(),
++                    ));
+                 } else {
+                     self.captured_request = Some(CapturedRequest::buffered(snapshot));
+ 
+@@ -1329,6 +1340,20 @@
+                                 );
+                             }
+                             request_body.apply_modified_body(&hook_body, body);
++                        }
++                        Ok(Ok(InterceptDecision::Respond { status, headers, body })) => {
++                            let status_code = http::StatusCode::from_u16(status)
++                                .unwrap_or(http::StatusCode::BAD_GATEWAY);
++                            let response = self.synthetic_ordered_response(status_code, headers, body)
++                                .unwrap_or_else(|error| {
++                                    tracing::warn!("Invalid replay headers: {error}");
++                                    self.synthetic_response(
++                                        http::StatusCode::BAD_GATEWAY,
++                                        http::HeaderMap::new(),
++                                        Bytes::new(),
++                                    )
++                                });
++                            return CompatRequestOrResponse::Response(response);
+                         }
+                         Ok(Ok(InterceptDecision::Block { status, body })) => {
+                             // Short-circuit: captured_request is already set above.
+--- a/proxyapi/src/ca/mod.rs
++++ b/proxyapi/src/ca/mod.rs
+@@ -190,7 +190,11 @@
+ 
+         let generated = self.gen_cert(authority)?;
+         let certificate = Arc::new(H3Certificate {
+-            certificate_pem: generated.certificate_pem,
++            // Include the root so clients using a CA SPKI pin can build the
++            // same chain over QUIC as over TCP without importing a system CA.
++            certificate_pem: Bytes::from([
++                generated.certificate_pem.as_ref(), self.ca_cert_pem.as_ref()
++            ].concat()),
+             private_key_pem: generated.private_key_pem,
+         });
+         self.h3_cache
+@@ -348,7 +352,9 @@
+         let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(generated.private_key_der));
+         let mut server_cfg = ServerConfig::builder()
+             .with_no_client_auth()
+-            .with_single_cert(vec![generated.certificate], private_key)?;
++            // A trusted CA SPKI pin requires that CA to appear in the chain.
++            .with_single_cert(vec![generated.certificate,
++                CertificateDer::from_pem_slice(&self.ca_cert_pem).map_err(|error| crate::error::Error::Other(error.to_string()))?], private_key)?;
+ 
+         server_cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+         let server_cfg = Arc::new(server_cfg);

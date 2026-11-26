@@ -1,141 +1,104 @@
 # ArchiveBox Proxy
 
-A proxy that saves navigated URLs to [ArchiveBox](https://github.com/mitmproxy/mitmproxy), implemented with [mitmproxy](https://github.com/mitmproxy/mitmproxy).
+A [Proxelar](https://github.com/emanuele-em/proxelar) caching proxy that queues visited pages for [ArchiveBox](https://github.com/ArchiveBox/ArchiveBox).
 
-*✨ Contributed by [Bruno Schroeder (@brunocek)](https://github.com/brunocek/archivebox-proxy)*
+Browse through the proxy to populate its cache. Navigation hooks then run normal `archivebox add --depth=0 URL` captures through a second listener backed by the same cache. Missing responses go upstream through the proxy. An optional read-only ArchiveBox collection supplies older responses before a cache miss reaches the internet.
 
----
-This project is intended to meet ArchiveBox's ticket 557: [Feature Request: Browser extension to submit either all history or certain URLs to a given ArchiveBox instance](https://github.com/ArchiveBox/ArchiveBox/issues/577).
+The proxy owns its CA, cache, navigation queue, and replay index. ArchiveBox owns its collection and runs its normal capture pipeline. The proxy writes no WARC files and does not access ArchiveBox's database. Each user runs a separate proxy and data directory.
 
-The main challenge is to serve ios, as ios does not allow firefox plugins to be installed.
-
+*Originally contributed by [Bruno Schroeder (@brunocek)](https://github.com/brunocek/archivebox-proxy).*
 
 ## Installation
 
-Pre-requisites: 
+Install [uv](https://docs.astral.sh/uv/) and [Rust through rustup](https://rustup.rs/), then build the pinned Proxelar engine:
 
-- ArchiveBox is installed and runs.
-- User can run `archivebox add <url>` on the machine where this project will run, and have it add the URL to the desired instance of ArchiveBox
-- python3 and pipenv are installed (else, on Debian, run `sudo apt-get install python3 pipenv` )
+```bash
+git clone https://github.com/ArchiveBox/archivebox-proxy.git
+cd archivebox-proxy
+uv sync --locked
+uv run python bin/build_engine.py --locked --release
+uv run archivebox-proxy \
+  --engine ./target/release/archivebox-proxy-engine \
+  --data "$HOME/.local/share/archivebox-proxy"
+```
+
+The build helper applies the checked-in Proxelar integration patch to a pinned source revision in the dependency cache. It adds direct intercepted responses, backpressure for interception events, and the CA chain needed by browser clients. Use the helper for builds and `--clippy` checks; `cargo fmt --check` checks the local Rust source.
+
+The visitor listener defaults to `127.0.0.1:8080`, and the ArchiveBox worker listener to `127.0.0.1:8082`. Both use the same independent cache. For automatic capture, install ArchiveBox normally, initialize a collection, and add:
+
+```bash
+uv run archivebox-proxy \
+  --engine ./target/release/archivebox-proxy-engine \
+  --data "$HOME/.local/share/archivebox-proxy" \
+  --archivebox-dir "$HOME/archivebox" \
+  --archive "$HOME/archivebox"
+```
+
+`--archivebox-dir` selects the working directory for the normal ArchiveBox CLI hook. `--archive` independently enables read-only archive fallback. `--archivebox-command '["uv","tool","run","archivebox"]'` can select a different CLI command prefix. Custom hooks use literal argument arrays, for example `--hook '["my-command","{url}"]'`; repeat the option to run multiple commands. Navigation logging is always enabled in `navigations.jsonl`.
+
+Docker Compose runs the standalone proxy with a persistent cache volume:
+
+```bash
+docker compose up --build -d
+docker compose cp proxy:/cache/ca/proxelar-ca.pem ./proxelar-ca.pem
+```
+
+Set `ARCHIVEBOX_DATA` to an existing collection and add `-f compose.archive.yaml` to mount it read-only for fallback. Add `-f compose.capture.yaml` instead to run ArchiveBox's CLI from its official image and enable automatic captures. The base file must come first: `docker compose -f compose.yaml -f compose.capture.yaml up --build -d`.
 
 ### Debian
 
-1. Clone this repository and have `mitmdump` on the same path (e.g. `/home/user/archivebox-proxy` )
-
-Please follow ( https://docs.mitmproxy.org/stable/overview-installation/ ) to install mitmdump.
-
-```
-PATH=/home/user/archivebox-proxy
-git clone https://codeberg.org/brunoschroeder/archivebox-proxy.git $PATH
-
-# mitmdump installation as of 2024-01 - alternatives exist
-cd $PATH
-wget https://downloads.mitmproxy.org/10.2.1/mitmproxy-10.2.1-linux-x86_64.tar.gz
-tar xf mitmproxy-10.2.1-linux-x86_64.tar.gz
-
-```
-
-2. Edit with vim `config-archivebox-proxy.yaml` and re-define `archivebox-path`
-
-If you wish to switch mode from **record** to **archive**, review parameter: `mode` (read section bellow about **Modes**).
-
-3. On `$PATH`, run:
-
-```
-cd $PATH
-pipenv shell
-pipenv install
-exit
-
-```
-
-4. Edit with vim `archivebox-proxy.service` and re-define `User`, `Group`, and `WorkingDirectory`
-
-5. Run: 
-
-```
-sudo ln -sv $PATH/archivebox-proxy.service /etc/systemd/system/archivebox-proxy.servicey
-sudo systemctl enable archivebox-proxy
-sudo systemctl start archivebox-proxy
-sudo systemctl status archivebox-proxy
-q
-
-```
-
-6. The **archivebox-proxy** should be up and running on port 8080. Test it by configuring a browser or device:
-
-> HTTP Proxy: <debian-server-ip>
-> HTTP Port: 8080
-> HTTPS Proxy: <debian-server-ip>
-> HTTPS Port: 8080
-
-HTTPS will not be working yet (bellow section on the TLS Certificate installation), test HTTP works by navigating to an HTTP only website, e.g.: `http://mitm.it`
+Native builds also require `clang`, `cmake`, `libclang-dev`, and `pkg-config`. For systemd, install the project at `/opt/archivebox-proxy`, copy the release engine to `/usr/local/bin/archivebox-proxy-engine`, and install `archivebox-proxy.service`. The unit keeps its state in `/var/lib/archivebox-proxy` and runs the standalone cache under a dynamic service user. Set the service user and collection permissions when enabling an ArchiveBox CLI hook.
 
 ## Configuring an HTTPS Client
 
-One needs to install the TLS Certificate on each of the clients in order to proxy HTTPS flow.
+Configure the client HTTP and HTTPS proxy to the visitor listener, then trust `DATA/ca/proxelar-ca.pem` as a certificate authority. Share only the certificate; the CA private key stays in the proxy data directory. Hook processes receive the worker proxy URL and CA trust configuration automatically, including curl, requests, wget, Node, and ArchiveBox's Chromium arguments.
 
-There are several ways to do it, please refer to: ( https://docs.mitmproxy.org/stable/concepts-certificates/ )
-
-This solution does not involve transparent proxy or services that would suffer from traffic that goes to certificate pinning endpoints.
+For access from another device, choose the listener with `--bind` and expose that address through your network configuration. Docker binds to loopback by default; `PROXY_BIND` controls the published address. Certificate-pinned applications need their own trust configuration.
 
 ## Modes
 
-Config file ( `config-archivebox-proxy.yaml` ) holds a parameter for `mode` that can be: **record**, or **archive**.
+`--mode` selects Proxelar's visitor transport. The worker listener remains an HTTP forward proxy in every mode.
 
-The reason for two modes is explained in the section bellow **Identifying User HTTP Requests - not trivial**.
+| Mode | Configuration |
+| --- | --- |
+| `forward` | HTTP forward proxy with HTTPS interception; default |
+| `socks5` | SOCKS5 listener with HTTP/HTTPS interception |
+| `reverse` | `--target https://upstream-host`; native HTTP/3 support |
+| `wireguard` | `--wireguard-endpoint host:port`; import `DATA/ca/proxelar-wg.conf` on the client |
+| `dns` | DNS listener; upstream set with `--dns-upstream IP:port` |
+| `udp` | UDP/QUIC forwarding to `--target IP:port` |
 
-On **record mode**, archivebox-proxy will record all the navigation on `record.yaml` file, and the user will need to latter on manually run `archivebox add record.yaml`. The user may edit the file with vim and remove some of the lines ( `dd` ) with URLs not for archiving.
+The HTTP/3 feature is built into the engine. DNS, WebSocket frames, and other native transport events are recorded in `events.jsonl`; response replay applies to completed HTTP exchanges. Long-lived upgraded streams continue through Proxelar.
 
-On **archive mode**, archivebox-proxy will run `archivebox add` to each of the identified URLs. Please read section **Identifying User HTTP requests - not trivial** bellow, before using this mode.
+`--policy` controls HTTP cache lookup:
 
+| Policy | Behavior |
+| --- | --- |
+| `auto` | Fresh cache, then archive, then upstream; default |
+| `record` | Always upstream, replacing matching cache entries |
+| `replay` | Cache including expired entries, then archive, then upstream |
+| `offline` | Cache including expired entries, then archive; HTTP misses return 504 |
+
+`offline` controls intercepted HTTP requests. It is not a firewall for DNS, raw UDP, or other forwarded protocols.
+
+Completed responses, including POST results and HTTP errors, stay fresh for at least 24 hours after capture. Longer origin freshness is retained. Request/response `no-store` and cookies do not prevent caching. Keys include the method, exact URL, request body, Range, Accept-Encoding, and Content-Type; cookies do not partition this single-user cache. Cache hits do not reset expiry.
+
+Bodies are content-addressed on disk, with SQLite metadata and a default 50 GiB LRU budget (`--cache-gb`). The default capture limit is 64 MiB per request/response body (`--body-limit` in bytes); truncated exchanges are forwarded and logged but never replayed as complete responses. Conditional 304 responses do not replace an existing response body.
 
 ## Comments
+
 ### Identifying User HTTP Requests - not trivial
 
-When developing this proxy, I came across research papers trying to solve the open problem of identifying User Actions in a HTTP Flow. It is not a trivial problem to solve as you can attest in the article bellow.
+A top-level navigation has `Sec-Fetch-Mode: navigate` and `Sec-Fetch-Dest: document`. Such requests on the visitor listener append to `navigations.jsonl` and enter the durable queue. Hooks start after ten seconds, allowing the original visit to populate the cache, and are deduplicated by URL for 24 hours. The worker listener suppresses navigation hooks to prevent recursive captures.
 
-At that time (2016), some of the evidence on HTTP flows:
+Hooks run sequentially as subprocesses. `hooks.jsonl` records starts, exit codes, and errors; `hooks.log` contains command output. Pending queue entries survive restarts. A hook interrupted after starting remains recorded for inspection because its side effects may already have committed.
 
-> "..a single request for the Huffington Post website results in the download of 408 objects from 113 unique domains. A similar analysis by Butkiewicz et al. [4], of 1,700 popular websites showed that the median landing page consists of at least 40 objects, requested from 10 or more servers, most of which are operated by third-party services."
+Archive fallback indexes `responses/index.jsonl` and CDX/CDXJ entries inside `archivewebpage/*.wacz`. Its derived index lives in the proxy data directory and refreshes as captures change. WACZ replay reads the indexed WARC byte range and preserves response headers and encoded bodies; POSTs must match the original paired request body. Loose `responses/` files support GET 200 replay from their recorded MIME type and decoded body. Missing, corrupt, or incompatible records fall through to the next source or upstream according to policy.
 
-> "..Here, the pool of starting pages is randomly selected from the top-1,000 most popular webpages according to alexa.com, excluding HTTPS pages and Chinese websites (using non-Roman script). HTTPS pages were omitted to allow fair head-to-head comparison. On average, each trace of 500 page requests resulted in 29,506 HTTP requests, distributed over 14.168 connections."
-
----
-
-As of today, 2024, traffic is HTTPS, but this problem still exists. 
-
-I implemented filters based on the authors insights and these can be tweaked by changing the float constants `__time_window_next` and `__reset_timer` in the script. (I may externalise them to the config file if users demand to constantly tinker with it).
-
-Some more filters may be in place:
-
-- mitmdump filter expressions, specially `'!~a'`, that filters out webpage assets. For more on these: (https://docs.mitmproxy.org/stable/concepts-filters/ )
-- commercial VPNs such as ivpn and mullvad filter adverts
-- projects such as [pihole](https://github.com/arkenfox/user.js)
-- firefox hardening such as [arkenfox](https://github.com/arkenfox/user.js)
-
-With all these filters running, I still get a lot of URLs that are not user action. More research must be invested on this. I count with your help on the issues forum.
-
----
-
-Georgios Rizothanasis; Niklas Carlsson; Aniket Mahanti
-Identifying User Actions from HTTP(S) Traffic
-IEEE, 2016
-( https://ieeexplore.ieee.org/document/7796839 )
-
+Run `uv run pytest -v` after building the debug engine with `uv run python bin/build_engine.py --locked`. Integration tests use real HTTPS and HTTP/3 origins, normal CLI subprocesses, persisted caches, and existing ArchiveBox capture fixtures.
 
 ### historic
 
-2024-01 Bruno Schroeder kick-starts and asks for contribution with the architectural decisions, and delivers a script for mitmproxy.
+2024-01: Bruno Schroeder contributed the original mitmproxy navigation recorder.
 
-### ios alternative solution
-
-For each tab:
-
-1. Hit share, and share it to iMarkdown or Obsidian 
-1. Obsidian asks which file to append to - one may have one file per tag/subject
-1. ios appends the url there (but sometimes it appends the page title and work must be re-done)
-1. Tab must be closed
-
-
-
+2026-11: Rewritten around Proxelar, an independent response cache, asynchronous navigation hooks, and read-only ArchiveBox replay.
