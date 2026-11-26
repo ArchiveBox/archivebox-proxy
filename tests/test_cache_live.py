@@ -2,8 +2,66 @@
 
 import json
 import sqlite3
+import subprocess
+import time
 
+import pytest
 from test_proxy_live import Proxy
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://httpbingo.org/drip?duration=3&numbytes=300&delay=0",
+        "https://httpbingo.org/sse?count=10&duration=3&delay=0",
+    ],
+)
+def test_cancelled_response_is_not_cached(tmp_path, url):
+    proxy = Proxy(tmp_path / "cancel")
+    try:
+        # Both origins really stream for three seconds. SSE has no declared
+        # length, so only native EOF tracking can distinguish it from a prefix.
+        result = subprocess.run(
+            [
+                "curl",
+                "--silent",
+                "--show-error",
+                "--noproxy",
+                "",
+                "--max-time",
+                "1",
+                "--proxy",
+                f"http://127.0.0.1:{proxy.port}",
+                "--cacert",
+                str(proxy.data / "ca/proxelar-ca.pem"),
+                url,
+            ],
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 28, result.stderr.decode()
+        assert result.stdout
+        log = tmp_path / "cancel.log"
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if any(
+                value in log.read_text()
+                for value in ("STORED ", "UNCACHED ", "Capture incomplete")
+            ):
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError(log.read_text())
+        with sqlite3.connect(proxy.data / "cache.sqlite3") as db:
+            assert db.execute("SELECT count(*) FROM responses").fetchone()[0] == 0
+        fields, complete = proxy.fetch(url)
+        assert b"x-archivebox-proxy-cache:" not in fields
+        assert len(complete) > len(result.stdout)
+        fields, replayed = proxy.fetch(url, worker=True)
+        assert b"x-archivebox-proxy-cache: hit" in fields
+        assert replayed == complete
+    finally:
+        proxy.close()
 
 
 def test_duplicate_cache_control_retains_longer_origin_lifetime(tmp_path):

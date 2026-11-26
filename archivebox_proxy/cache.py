@@ -81,6 +81,28 @@ def response_headers(fields, length, method="GET", status=200):
     return result
 
 
+def complete_response(status, fields, size, method="GET"):
+    # Validate the encoded bytes before replacing transfer framing. Otherwise a
+    # cancelled video download gets a new, shorter Content-Length and looks valid.
+    if method == "HEAD" or status in (204, 205, 304):
+        return size == 0
+    for name, value in fields:
+        if name.lower() == "content-length":
+            for length in value.split(","):
+                if not length.strip().isdecimal() or int(length) != size:
+                    return False
+        elif name.lower() == "content-range" and status == 206:
+            match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+|\*)", value, re.IGNORECASE)
+            if not match:
+                return False
+            start, end = int(match[1]), int(match[2])
+            if end < start or end - start + 1 != size:
+                return False
+            if match[3] != "*" and end >= int(match[3]):
+                return False
+    return True
+
+
 def expiry(fields, now):
     hs = {k.lower(): v for k, v in fields}
     # Origins commonly split max-age and public into separate header fields.
@@ -122,7 +144,7 @@ class Cache:
         )
         self.db.commit()
 
-    def get(self, key, historical=False):
+    def get(self, key, historical=False, method="GET"):
         with self.lock:
             row = self.db.execute(
                 "SELECT filename,status,headers,size,expires FROM responses WHERE key=?",
@@ -131,7 +153,16 @@ class Cache:
             if not row or (not historical and row[4] <= time.time()):
                 return None
             path = self.blobs / row[0]
-            if not path.is_file():
+            fields = json.loads(row[2])
+            if (
+                not path.is_file()
+                or path.stat().st_size != row[3]
+                or not complete_response(row[1], fields, row[3], method)
+            ):
+                # Older versions could store an interrupted body. Remove its row
+                # before returning a miss; normal pruning collects orphan bytes.
+                self.db.execute("DELETE FROM responses WHERE key=?", (key,))
+                self.db.commit()
                 return None
             self.db.execute(
                 "UPDATE responses SET used=? WHERE key=?", (time.time(), key)
@@ -140,12 +171,16 @@ class Cache:
             return {
                 "path": path,
                 "status": row[1],
-                "headers": json.loads(row[2]),
+                "headers": fields,
                 "size": row[3],
             }
 
     def put(self, key, status, fields, payload, method="GET"):
-        if status < 200 or status == 304:
+        if (
+            status < 200
+            or status == 304
+            or not complete_response(status, fields, len(payload), method)
+        ):
             return False
         name = hashlib.sha256(payload).hexdigest()
         path = self.blobs / name
@@ -183,12 +218,24 @@ class Cache:
     def prune(self):
         with self.lock:
             rows = self.db.execute(
-                "SELECT key,filename,size FROM responses ORDER BY used DESC"
+                "SELECT key,filename,size,status,headers FROM responses ORDER BY used DESC"
             ).fetchall()
             kept, used, remove = set(), 0, []
-            for key, name, size in rows:
+            for key, name, size, status, fields in rows:
                 extra = 0 if name in kept else size
-                if used + extra > self.max_bytes:
+                path = self.blobs / name
+                # The legacy table has no request method. Empty HEAD bodies may
+                # legitimately retain a representation's nonzero declared size;
+                # get() checks them against the actual request method on replay.
+                valid = complete_response(
+                    status, json.loads(fields), size, "HEAD" if size == 0 else "GET"
+                )
+                if (
+                    not valid
+                    or not path.is_file()
+                    or path.stat().st_size != size
+                    or used + extra > self.max_bytes
+                ):
                     remove.append((key,))
                 else:
                     kept.add(name)

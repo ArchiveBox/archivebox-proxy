@@ -80,7 +80,10 @@ class Controller:
         async with self.lock:
             hit = (
                 await asyncio.to_thread(
-                    self.cache.get, key, self.policy in ("replay", "offline")
+                    self.cache.get,
+                    key,
+                    self.policy in ("replay", "offline"),
+                    request["method"],
                 )
                 if self.policy != "record"
                 else None
@@ -104,7 +107,9 @@ class Controller:
                     await asyncio.to_thread(
                         self.cache.put, key, status, fields, payload, request["method"]
                     )
-                    hit = await asyncio.to_thread(self.cache.get, key)
+                    hit = await asyncio.to_thread(
+                        self.cache.get, key, method=request["method"]
+                    )
                     self.stats["archive_hit"] += 1
                     if hit:
                         LOG.info(
@@ -177,7 +182,13 @@ class Controller:
                 m.get("body_metadata", {}).get("truncated") for m in (request, response)
             ):
                 self.stats["truncated"] += 1
-                LOG.warning("Capture exceeded body limit: %s", request["uri"])
+                LOG.warning(
+                    "Capture incomplete or exceeded body limit: %s %s %s %s",
+                    source,
+                    flow["id"],
+                    request["method"],
+                    request["uri"],
+                )
             elif self.policy != "offline":
                 async with self.lock:
                     stored = await asyncio.to_thread(
