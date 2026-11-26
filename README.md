@@ -37,11 +37,12 @@
 <td colspan="2"></td>
 </tr>
 <tr>
-<td colspan="2"></td>
+<td></td>
 <td colspan="3" align="center">
 <strong>🗃️ ArchiveBox</strong><br><br>
 <a href="https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/archivebox-likes.png"><img src="https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/archivebox-likes.png" width="100%" alt="ArchiveBox snapshot with the captured X posts and images" /></a>
 </td>
+<td></td>
 </tr>
 </table>
 
