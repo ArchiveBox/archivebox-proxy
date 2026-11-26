@@ -1,0 +1,118 @@
+name: Wheels
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the tested wheels to PyPI
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || !inputs.publish }}
+
+jobs:
+  wheels:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64
+            runner: ubuntu-24.04
+            identifier: cp313-manylinux_x86_64
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            identifier: cp313-manylinux_aarch64
+          - target: macos-amd64
+            runner: macos-15-intel
+            identifier: cp313-macosx_x86_64
+          - target: macos-arm64
+            runner: macos-15
+            identifier: cp313-macosx_arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          version: "0.11.29"
+          python-version: "3.13"
+          enable-cache: true
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew list cmake >/dev/null || brew install cmake
+          rustup toolchain install 1.99.1 --profile minimal
+      - name: Build and exercise installed wheel
+        env:
+          WHEEL_IDENTIFIER: ${{ matrix.identifier }}
+        run: uvx --from cibuildwheel==4.3.5 cibuildwheel --only "$WHEEL_IDENTIFIER" --output-dir dist
+      - name: Check package metadata
+        run: |
+          uvx --from twine==7.0.0 twine check --strict dist/*.whl
+          uv publish --dry-run --trusted-publishing never dist/*.whl
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wheels-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/master'
+    needs: wheels
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          version: "0.11.29"
+          python-version: "3.13"
+      - name: Require full CI for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(gh run list --workflow test.yml --commit "$GITHUB_SHA" --limit 20 --json conclusion --jq 'any(.[]; .conclusion == "success")')" = true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - name: Verify all four distributions
+        run: |
+          uv run --no-project python - <<'PY'
+          import tomllib
+          import zipfile
+          from pathlib import Path
+          version = tomllib.loads(Path('pyproject.toml').read_text())['project']['version']
+          wheels = list(Path('dist').glob('*.whl'))
+          assert len(wheels) == 4, wheels
+          for platform in ('manylinux_2_28_x86_64', 'manylinux_2_28_aarch64', 'macosx_11_0_x86_64', 'macosx_11_0_arm64'):
+              matching = [wheel for wheel in wheels if platform in wheel.name]
+              assert len(matching) == 1, (platform, wheels)
+          for wheel in wheels:
+              assert wheel.name.startswith(f'archivebox_proxy-{version}-py3-none-'), wheel
+              with zipfile.ZipFile(wheel) as archive:
+                  engine = archive.getinfo('archivebox_proxy/bin/archivebox-proxy-engine')
+                  assert engine.external_attr >> 16 & 0o111, wheel
+          PY
+      # Only wheels are published: installation never needs a compiler or a
+      # first-run binary download, and unsupported platforms fail at resolution.
+      - name: Publish to PyPI
+        run: uv publish --trusted-publishing always dist/*.whl

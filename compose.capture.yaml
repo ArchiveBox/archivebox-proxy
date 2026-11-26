@@ -4,11 +4,12 @@ services:
     build:
       target: with-archivebox
       args:
-        ARCHIVEBOX_IMAGE: ${ARCHIVEBOX_IMAGE:-archivebox/archivebox:0.9.78rc683}
+        ARCHIVEBOX_IMAGE: ${ARCHIVEBOX_IMAGE:-archivebox/archivebox:dev}
     image: archivebox-proxy:with-archivebox
     environment:
       ARCHIVEBOX_DATA: /data
       PROXY_ARCHIVE: /archivebox
+      PROXY_PERSONA: "${PROXY_PERSONA:-}"
     volumes:
       # The normal CLI writes /data and replay reads /archivebox. Both processes
       # share this container and UID, so these paths are not a security boundary.

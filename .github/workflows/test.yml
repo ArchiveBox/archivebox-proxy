@@ -70,6 +70,16 @@ jobs:
           done
           test -s /tmp/proxy-ca.pem
           curl --noproxy '' --fail --silent --show-error --max-time 30 --cacert /tmp/proxy-ca.pem --proxy http://127.0.0.1:18880 https://news.ycombinator.com/ -o /tmp/first.html
+          # Streaming completion precedes the controller's asynchronous store.
+          # Observe persistence before making the one warm-cache request.
+          for _ in {1..100}; do
+            if docker exec proxy sh -c "grep -q 'STORED visitor .* 200 GET https://news.ycombinator.com/' /cache/proxy.log"; then
+              break
+            fi
+            test "$(docker inspect --format '{{.State.Running}}' proxy)" = true
+            sleep 0.1
+          done
+          docker exec proxy sh -c "grep -q 'STORED visitor .* 200 GET https://news.ycombinator.com/' /cache/proxy.log"
           curl --noproxy '' --fail --silent --show-error --max-time 30 --cacert /tmp/proxy-ca.pem --proxy http://127.0.0.1:18882 https://news.ycombinator.com/ -D /tmp/second.headers -o /tmp/second.html
           cmp /tmp/first.html /tmp/second.html
           grep -qi '^x-archivebox-proxy-cache: HIT' /tmp/second.headers

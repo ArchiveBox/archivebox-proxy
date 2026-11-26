@@ -29,6 +29,7 @@ class Proxy:
                 "uv",
                 "run",
                 "archivebox-proxy",
+                "--verbose",
                 "--data",
                 str(data),
                 "--port",
