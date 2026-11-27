@@ -46,14 +46,16 @@ def argv(value):
 
 
 def default_engine():
-    bundled = Path(__file__).resolve().parent / "bin/archivebox-proxy-engine"
+    bundled = Path(__file__).resolve().parent / "engine/archivebox-proxy-engine"
     if bundled.is_file():
         return str(bundled)
     # Editable source checkouts use their local build; installed wheels always
     # carry the executable and never download or compile anything at startup.
-    source = Path(__file__).resolve().parents[1]
+    source = Path(__file__).resolve().parents[2]
     development = source / "target/debug/archivebox-proxy-engine"
-    if (source / "Cargo.toml").is_file() and development.is_file():
+    if (
+        source / "src/archivebox_proxy/engine/Cargo.toml"
+    ).is_file() and development.is_file():
         return str(development)
     # Retain existing source installations that placed their compiled executable
     # on PATH, while preferring the matching executable shipped in each wheel.

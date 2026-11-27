@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/archive.png" width="76" alt="ArchiveBox" />
+<img src="https://github.com/ArchiveBox/archivebox-proxy/releases/download/v0.1.0/archive.png" width="76" alt="ArchiveBox" />
 
 # ArchiveBox Proxy
 
@@ -17,7 +17,7 @@
 
 </div>
 
-<a href="https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/overview.svg"><img src="https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/overview.svg" width="100%" alt="Your browser exchanges traffic with archivebox-proxy, which caches responses, fetches missing resources from the internet, and queues ArchiveBox captures through the same cache." /></a>
+<a href="https://github.com/ArchiveBox/archivebox-proxy/releases/download/v0.1.0/overview.png"><img src="https://github.com/ArchiveBox/archivebox-proxy/releases/download/v0.1.0/overview.png" width="100%" alt="Your browser exchanges traffic with archivebox-proxy, which caches responses, fetches missing resources from the internet, and queues ArchiveBox captures through the same cache." /></a>
 
 ## Installation
 
@@ -55,7 +55,7 @@ docker compose exec -T proxy archivebox-proxy --export-ca > proxelar-ca.pem
 archivebox-proxy --install-ca proxelar-ca.pem
 ```
 
-To include ArchiveBox, set `ARCHIVEBOX_DATA` to your initialized collection and use the [capture configuration](https://github.com/ArchiveBox/archivebox-proxy/blob/master/docker-compose.capture.yml). It uses **`archivebox/archivebox:dev`**. The [archive configuration](https://github.com/ArchiveBox/archivebox-proxy/blob/master/docker-compose.archive.yml) mounts an existing collection for replay.
+The included `docker-compose.yml` starts both **ArchiveBox Proxy** and **`archivebox/archivebox:dev`**. Open **[localhost:8000](http://localhost:8000)** to browse your snapshots. Your collection is saved in **`~/archivebox/data`**; set `ARCHIVEBOX_DATA` to use another location.
 
 </details>
 
@@ -63,7 +63,7 @@ To include ArchiveBox, set `ARCHIVEBOX_DATA` to your initialized collection and 
 
 On macOS, open **System Settings → Wi-Fi → Details → Proxies**. Enable **SOCKS proxy**, enter **127.0.0.1**, port **8080**, and click **OK**. Chrome uses these settings automatically.
 
-![macOS SOCKS proxy setup with server 127.0.0.1 and port 8080](https://raw.githubusercontent.com/ArchiveBox/archivebox-proxy/master/docs/images/macos-socks-proxy.jpg)
+![macOS SOCKS proxy setup with server 127.0.0.1 and port 8080](https://github.com/ArchiveBox/archivebox-proxy/releases/download/v0.1.0/macos-socks-proxy.jpg)
 
 Browse normally. With `--archivebox`, your visits also become ArchiveBox snapshots.
 

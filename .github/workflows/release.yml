@@ -29,16 +29,18 @@ jobs:
         include:
           - target: linux-amd64
             runner: ubuntu-24.04
-            identifier: cp313-manylinux_x86_64
+            architecture: x86_64
+            image: quay.io/pypa/manylinux_2_28_x86_64@sha256:e0adf18521ad35192df733a6c62d35df7801957d24e0470238aacecfab2188a3
           - target: linux-arm64
             runner: ubuntu-24.04-arm
-            identifier: cp313-manylinux_aarch64
+            architecture: aarch64
+            image: quay.io/pypa/manylinux_2_28_aarch64@sha256:a3e02308c822fb6ce0d12248b0c941817ba5e1a1bc9e7bb5929f29c50eaa40a9
           - target: macos-amd64
             runner: macos-15-intel
-            identifier: cp313-macosx_x86_64
+            architecture: x86_64
           - target: macos-arm64
             runner: macos-15
-            identifier: cp313-macosx_arm64
+            architecture: arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 35
     steps:
@@ -54,12 +56,35 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew list cmake >/dev/null || brew install cmake
-          rustup toolchain install 1.99.1 --profile minimal
-      - name: Build and exercise installed wheel
+      - name: Build and exercise Linux wheel
+        if: runner.os == 'Linux'
         env:
-          WHEEL_IDENTIFIER: ${{ matrix.identifier }}
-          CIBW_TEST_COMMAND: uv run --no-project python {project}/bin/test_wheel.py --install-ca
-        run: uvx --from cibuildwheel==4.3.5 cibuildwheel --only "$WHEEL_IDENTIFIER" --output-dir dist
+          MANYLINUX_IMAGE: ${{ matrix.image }}
+          WHEEL_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          docker run --rm -v "$PWD:/project" -w /project \
+            -e WHEEL_ARCHITECTURE -e CARGO_TARGET_DIR=/tmp/target \
+            "$MANYLINUX_IMAGE" bash -euo pipefail -c '
+              dnf install -y clang clang-devel cmake git
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
+              export PATH="/root/.cargo/bin:$PATH"
+              uv run --no-project --python /opt/python/cp313-cp313/bin/python python bin/build_wheel.py --out-dir /tmp/native-wheel
+              uvx --from auditwheel==6.8.2 auditwheel repair --plat "manylinux_2_28_$WHEEL_ARCHITECTURE" --wheel-dir dist /tmp/native-wheel/*.whl
+              uv venv --python /opt/python/cp313-cp313/bin/python /tmp/wheel-test
+              uv pip install --python /tmp/wheel-test/bin/python dist/*.whl
+              VIRTUAL_ENV=/tmp/wheel-test PATH="/tmp/wheel-test/bin:$PATH" uv run --no-project python bin/test_wheel.py --install-ca
+            '
+      - name: Build and exercise macOS wheel
+        if: runner.os == 'macOS'
+        env:
+          WHEEL_ARCHITECTURE: ${{ matrix.architecture }}
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          uv run --no-project python bin/build_wheel.py --out-dir "$RUNNER_TEMP/native-wheel"
+          uvx --from delocate==0.13.0 delocate-wheel --require-archs "$WHEEL_ARCHITECTURE" --wheel-dir dist "$RUNNER_TEMP/native-wheel"/*.whl
+          uv venv --python 3.13 "$RUNNER_TEMP/wheel-test"
+          uv pip install --python "$RUNNER_TEMP/wheel-test/bin/python" dist/*.whl
+          VIRTUAL_ENV="$RUNNER_TEMP/wheel-test" PATH="$RUNNER_TEMP/wheel-test/bin:$PATH" uv run --no-project python bin/test_wheel.py --install-ca
       - name: Check package metadata
         run: |
           uvx --from twine==7.0.0 twine check --strict dist/*.whl
@@ -112,8 +137,10 @@ jobs:
           for wheel in wheels:
               assert wheel.name.startswith(f'archivebox_proxy-{version}-py3-none-'), wheel
               with zipfile.ZipFile(wheel) as archive:
-                  engine = archive.getinfo('archivebox_proxy/bin/archivebox-proxy-engine')
+                  engine = archive.getinfo('archivebox_proxy/engine/archivebox-proxy-engine')
                   assert engine.external_attr >> 16 & 0o111, wheel
+                  metadata = archive.read(next(name for name in archive.namelist() if name.endswith('/WHEEL'))).decode()
+                  assert 'Root-Is-Purelib: false' in metadata, wheel
           PY
       # Only wheels are published: installation never needs a compiler or a
       # first-run binary download, and unsupported platforms fail at resolution.

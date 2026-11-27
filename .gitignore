@@ -1,6 +1,6 @@
-y-forums
-w-github
 /target/
+/dist/
+/src/archivebox_proxy/engine/archivebox-proxy-engine
 /.venv/
 /data/
 __pycache__/

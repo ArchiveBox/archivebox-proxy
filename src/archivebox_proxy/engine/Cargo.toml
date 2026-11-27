@@ -5,6 +5,10 @@ edition = "2024"
 rust-version = "1.99"
 license = "MIT"
 
+[[bin]]
+name = "archivebox-proxy-engine"
+path = "main.rs"
+
 [dependencies]
 proxyapi = { git = "https://github.com/emanuele-em/proxelar", rev = "91bf33d21c6ff6daa984979310e9b54795f70e4c", features = ["http3"] }
 proxyapi_models = { git = "https://github.com/emanuele-em/proxelar", rev = "91bf33d21c6ff6daa984979310e9b54795f70e4c" }

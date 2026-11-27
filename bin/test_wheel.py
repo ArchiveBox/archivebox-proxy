@@ -36,7 +36,7 @@ def main():
     parser.add_argument("--install-ca", action="store_true")
     options = parser.parse_args()
     package = Path(archivebox_proxy.__file__).resolve().parent
-    engine = package / "bin/archivebox-proxy-engine"
+    engine = package / "engine/archivebox-proxy-engine"
     assert engine.is_file() and os.access(engine, os.X_OK), engine
     subprocess.run([str(engine), "--help"], check=True, capture_output=True)
     cli = shutil.which("archivebox-proxy")

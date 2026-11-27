@@ -1,25 +1,77 @@
+# Both services use the same ArchiveBox runtime and packaged proxy executable.
+x-archivebox: &archivebox
+  image: archivebox-proxy:local
+  build:
+    context: .
+    dockerfile_inline: |
+      # syntax=docker/dockerfile:1
+      ARG ARCHIVEBOX_IMAGE=archivebox/archivebox:dev
+      FROM ghcr.io/astral-sh/uv:0.11.29 AS uv
+      FROM rust:bookworm AS build
+      COPY --from=uv /uv /uvx /usr/local/bin/
+      RUN apt-get update && apt-get install -y --no-install-recommends clang cmake libclang-dev pkg-config && rm -rf /var/lib/apt/lists/*
+      WORKDIR /build
+      COPY src ./src
+      COPY bin ./bin
+      COPY pyproject.toml uv.lock LICENSE README.md ./
+      # Reuse compiled dependencies across Python edits, and install the exact
+      # runtime dependency versions tested by the repository lockfile.
+      RUN --mount=type=cache,target=/build/target --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/root/.cache \
+          uv run --no-project --python 3.13 python bin/build_engine.py --locked --release && \
+          uv run --no-project --python 3.13 python bin/build_wheel.py --engine /build/target/release/archivebox-proxy-engine --out-dir /wheels && \
+          uv export --locked --no-dev --no-emit-project --output-file /wheels/constraints.txt
+      FROM $${ARCHIVEBOX_IMAGE}
+      USER root
+      WORKDIR /opt/archivebox-proxy
+      RUN --mount=type=bind,from=build,source=/wheels,target=/wheels \
+          env -u VIRTUAL_ENV UV_CACHE_DIR=/tmp/proxy-uv-cache uv venv --python /venv/bin/python3 /opt/archivebox-proxy/venv && \
+          UV_CACHE_DIR=/tmp/proxy-uv-cache uv pip install --python /opt/archivebox-proxy/venv/bin/python --no-cache --constraints /wheels/constraints.txt /wheels/*.whl && \
+          rm -rf /tmp/proxy-uv-cache && \
+          ln -s /opt/archivebox-proxy/venv/bin/archivebox-proxy /usr/local/bin/archivebox-proxy && \
+          install -d -m 1777 /cache
+      COPY LICENSE src/archivebox_proxy/engine/patches/Proxelar.LICENSE-MIT /usr/share/licenses/archivebox-proxy/
+      # The official entrypoint matches the collection's owner. A sticky volume
+      # parent lets that user create its private cache without forcing UID 911.
+      ENV PROXY_DATA=/cache/proxy
+      WORKDIR /data
+  restart: unless-stopped
+  shm_size: 1gb
+  volumes:
+    - ${ARCHIVEBOX_DATA:-${HOME}/archivebox/data}:/data
+    - proxy-cache:/cache
+    - tmp:/tmp/archivebox
+  environment: &environment
+    # Optional ArchiveBox settings apply to both the web server's workers and
+    # the proxy's normal archivebox add subprocesses.
+    PUID:
+    PGID:
+    PLUGINS:
+    CHROME_ARGS_EXTRA:
+    ARCHIVEDOTORG_ENABLED:
+    ADMIN_USERNAME:
+    ADMIN_PASSWORD:
+    PUBLIC_INDEX:
+    PUBLIC_SNAPSHOTS:
+    PUBLIC_ADD_VIEW:
+    BASE_URL:
+    SERVER_SECURITY_MODE:
+  stop_grace_period: 30s
+
 services:
   proxy:
-    build:
-      context: .
-      target: runtime
-    image: archivebox-proxy:local
-    restart: unless-stopped
-    # Published host addresses are separate from these container listeners.
+    <<: *archivebox
     command:
-      - --bind
-      - 0.0.0.0
-      - --port
-      - "8080"
-      - --worker-bind
-      - 0.0.0.0
-      - --worker-port
-      - "8082"
+      - /bin/sh
+      - -ec
+      - |
+        if [ ! -f /data/index.sqlite3 ]; then archivebox init; fi
+        exec archivebox-proxy --bind 0.0.0.0 --port 8080 --worker-bind 0.0.0.0 --worker-port 8082 --worker-proxy http://proxy:8082 --archivebox /data
     environment:
+      <<: *environment
       PROXY_RECORD: "${PROXY_RECORD:-true}"
       PROXY_CACHE: "${PROXY_CACHE:-true}"
       PROXY_REPLAY: "${PROXY_REPLAY:-true}"
-      PROXY_MODE: "${PROXY_MODE:-forward}"
+      PROXY_MODE: "${PROXY_MODE:-socks5}"
       PROXY_TARGET: "${PROXY_TARGET:-}"
       PROXY_WIREGUARD_ENDPOINT: "${PROXY_WIREGUARD_ENDPOINT:-${WIREGUARD_ENDPOINT:-}}"
       PROXY_DNS_UPSTREAM: "${PROXY_DNS_UPSTREAM:-1.1.1.1:53}"
@@ -27,13 +79,44 @@ services:
       PROXY_CACHE_GB: "${PROXY_CACHE_GB:-50}"
       PROXY_BODY_LIMIT: "${PROXY_BODY_LIMIT:-67108864}"
       PROXY_HOOK: "${PROXY_HOOK:-}"
+      PROXY_PERSONA: "${PROXY_PERSONA:-}"
     ports:
       - "${PROXY_BIND:-127.0.0.1}:${PROXY_PORT:-8080}:8080/tcp"
       - "${PROXY_BIND:-127.0.0.1}:${PROXY_PORT:-8080}:8080/udp"
       - "127.0.0.1:${PROXY_WORKER_PORT:-8082}:8082/tcp"
-    volumes:
-      - proxy-cache:/cache
-    stop_grace_period: 30s
+    healthcheck:
+      # The server starts only after initialization, CA creation and the actual
+      # HTTP capture listener is ready; an old certificate alone does not prove readiness.
+      test: ["CMD", "/opt/archivebox-proxy/venv/bin/python", "-c", "import socket; from pathlib import Path; assert Path('/cache/proxy/trust.pem').is_file(); socket.create_connection(('127.0.0.1', 8082), 2).close()"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      start_interval: 1s
+      retries: 3
+
+  archivebox:
+    <<: *archivebox
+    depends_on:
+      proxy:
+        condition: service_healthy
+    # The web server can also schedule captures. Reuse the same environment
+    # builder as proxy hooks so every worker receives identical CA/proxy trust.
+    command:
+      - /opt/archivebox-proxy/venv/bin/python
+      - -c
+      - |
+        import asyncio, os
+        from pathlib import Path
+        from archivebox_proxy.cli import hook_environment, chrome_environment
+        directory = Path(os.environ['PROXY_DATA'])
+        ca = directory / 'ca'
+        proxy = 'http://proxy:8082'
+        env = hook_environment(directory, ca, proxy)
+        asyncio.run(chrome_environment(env, ca, proxy))
+        os.execvpe('archivebox', ['archivebox', 'server', '--init', '0.0.0.0:5797'], env)
+    ports:
+      - "127.0.0.1:${ARCHIVEBOX_PORT:-8000}:5797"
 
 volumes:
   proxy-cache:
+  tmp:
