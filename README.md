@@ -55,7 +55,7 @@ docker compose exec -T proxy archivebox-proxy --export-ca > proxelar-ca.pem
 archivebox-proxy --install-ca proxelar-ca.pem
 ```
 
-The included `docker-compose.yml` starts both **ArchiveBox Proxy** and **`archivebox/archivebox:dev`**. Open **[localhost:8000](http://localhost:8000)** to browse your snapshots. Your collection is saved in **`~/archivebox/data`**; set `ARCHIVEBOX_DATA` to use another location.
+The included `docker-compose.yml` starts both **ArchiveBox Proxy** and **`archivebox/archivebox:dev`**. Open **[archivebox.localhost:8000](http://archivebox.localhost:8000)** to browse your snapshots. Your collection is saved in **`~/archivebox/data`**; set `ARCHIVEBOX_DATA` to use another location.
 
 </details>
 

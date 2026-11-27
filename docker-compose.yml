@@ -53,7 +53,7 @@ x-archivebox: &archivebox
     PUBLIC_INDEX:
     PUBLIC_SNAPSHOTS:
     PUBLIC_ADD_VIEW:
-    BASE_URL:
+    BASE_URL: "${BASE_URL:-http://archivebox.localhost:${ARCHIVEBOX_PORT:-8000}}"
     SERVER_SECURITY_MODE:
   stop_grace_period: 30s
 

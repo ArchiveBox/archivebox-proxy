@@ -68,7 +68,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl --noproxy '' --fail --silent --show-error --max-time 30 --cacert /tmp/proxy-ca.pem --proxy socks5h://127.0.0.1:18880 -H 'Accept-Encoding: gzip, deflate, br, zstd' -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-Dest: document' https://news.ycombinator.com/ask -o /tmp/first.html
+          curl --compressed --noproxy '' --fail --silent --show-error --max-time 30 --cacert /tmp/proxy-ca.pem --proxy socks5h://127.0.0.1:18880 -H 'Accept-Encoding: gzip, deflate, br, zstd' -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-Dest: document' https://news.ycombinator.com/ask -o /tmp/first.html
           # Observe the asynchronous store before the one warm-cache request.
           for _ in {1..100}; do
             if docker compose exec -T proxy sh -c "grep -q 'STORED visitor .* 200 GET https://news.ycombinator.com/ask' /cache/proxy/proxy.log"; then
@@ -77,7 +77,7 @@ jobs:
             sleep 0.1
           done
           docker compose exec -T proxy sh -c "grep -q 'STORED visitor .* 200 GET https://news.ycombinator.com/ask' /cache/proxy/proxy.log"
-          curl --noproxy '' --fail --silent --show-error --max-time 30 --cacert /tmp/proxy-ca.pem --proxy http://127.0.0.1:18882 -H 'Accept-Encoding: gzip, deflate, br, zstd' https://news.ycombinator.com/ask -D /tmp/second.headers -o /tmp/second.html
+          curl --compressed --noproxy '' --fail --silent --show-error --max-time 30 --cacert /tmp/proxy-ca.pem --proxy http://127.0.0.1:18882 -H 'Accept-Encoding: gzip, deflate, br, zstd' https://news.ycombinator.com/ask -D /tmp/second.headers -o /tmp/second.html
           cmp /tmp/first.html /tmp/second.html
           grep -qi '^x-archivebox-proxy-cache: HIT' /tmp/second.headers
           grep -q 'Hacker News' /tmp/second.html
