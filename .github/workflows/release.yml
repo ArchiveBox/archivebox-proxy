@@ -2,7 +2,7 @@ name: Wheels
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -96,7 +96,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/master'
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
     needs: wheels
     runs-on: ubuntu-24.04
     environment: pypi

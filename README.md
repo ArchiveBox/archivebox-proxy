@@ -12,8 +12,8 @@
   <a href="#modes">CLI &amp; configuration</a>
 </p>
 
-[![Tests](https://github.com/ArchiveBox/archivebox-proxy/actions/workflows/test.yml/badge.svg?branch=master)](https://github.com/ArchiveBox/archivebox-proxy/actions/workflows/test.yml)
-[![MIT License](https://img.shields.io/badge/license-MIT-334155)](https://github.com/ArchiveBox/archivebox-proxy/blob/master/LICENSE)
+[![Tests](https://github.com/ArchiveBox/archivebox-proxy/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/ArchiveBox/archivebox-proxy/actions/workflows/test.yml)
+[![MIT License](https://img.shields.io/badge/license-MIT-334155)](https://github.com/ArchiveBox/archivebox-proxy/blob/main/LICENSE)
 
 </div>
 
@@ -46,7 +46,7 @@ For authenticated pages, add `--persona NAME` to use the same saved session as y
 <details>
 <summary><strong>Docker Compose</strong></summary>
 
-[Download this repository](https://github.com/ArchiveBox/archivebox-proxy/archive/refs/heads/master.zip) and run `docker compose up -d --build`. Look for **ArchiveBox Proxy is ready** in `docker compose logs`.
+[Download this repository](https://github.com/ArchiveBox/archivebox-proxy/archive/refs/heads/main.zip) and run `docker compose up -d --build`. Look for **ArchiveBox Proxy is ready** in `docker compose logs`.
 
 Export its certificate and trust it on your computer:
 
@@ -125,4 +125,4 @@ Use `--hook` to run your own command when you visit a page. See `archivebox-prox
 
 </details>
 
-[MIT](https://github.com/ArchiveBox/archivebox-proxy/blob/master/LICENSE). Powered by [Proxelar](https://github.com/emanuele-em/proxelar) and [ArchiveBox](https://github.com/ArchiveBox/ArchiveBox).
+[MIT](https://github.com/ArchiveBox/archivebox-proxy/blob/main/LICENSE). Powered by [Proxelar](https://github.com/emanuele-em/proxelar) and [ArchiveBox](https://github.com/ArchiveBox/ArchiveBox).
